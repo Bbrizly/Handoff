@@ -1,6 +1,6 @@
 {
   "name": "hn",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Local-first remote execution over SSH with Mutagen and Zellij",
   "type": "module",
