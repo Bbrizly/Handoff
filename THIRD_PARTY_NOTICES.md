@@ -8,7 +8,7 @@ EnvHaven (`envhaven/envhaven`) was studied as an architectural reference for the
 
 ## Mutagen
 
-`hn` invokes a separately installed Mutagen executable for synchronization and forwarding. Mutagen is not vendored or redistributed by this repository. Mutagen licensing differs by build; review the upstream license before bundling Mutagen in a distributed product.
+`hn` downloads the pinned official Mutagen v0.18.1 release archive at runtime from the upstream GitHub release, verifies it against the upstream `SHA256SUMS`, and stores the executable plus `mutagen-agents.tar.gz` under the user's `~/.hn/bin` directory. Mutagen binaries are not committed or redistributed in this repository. Mutagen licensing differs by build; review the upstream license before packaging or redistributing Mutagen as part of a public/commercial installer.
 
 ## Zellij
 
