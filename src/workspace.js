@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { defaultRemoteRoot, isInside, normalizeLocalPath } from "./resolve.js";
-import { requireWorker, saveConfig } from "./config.js";
+import { saveConfig } from "./config.js";
 import { fail, normalizeName } from "./util.js";
 
 export function normalizeRemotePath(input) {
@@ -49,11 +49,10 @@ export function addWorker(config, nameInput, worker) {
   return name;
 }
 
-export function createWorkspace(config, nameInput, defaultWorker = null) {
+export function createWorkspace(config, nameInput) {
   const name = normalizeName(nameInput, "workspace name");
   if (config.workspaces[name]) fail(`Workspace '${name}' already exists.`);
-  if (defaultWorker) requireWorker(config, defaultWorker);
-  config.workspaces[name] = defaultWorker ? { defaultWorker, roots: [] } : { roots: [] };
+  config.workspaces[name] = { roots: [] };
   saveConfig(config);
   return name;
 }
