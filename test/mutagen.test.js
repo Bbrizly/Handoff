@@ -9,9 +9,12 @@ test("Mutagen SSH endpoint includes custom ports correctly", () => {
   assert.equal(mutagenEndpoint(worker, "hn/main/GitHub"), "me@example.com:2222:hn/main/GitHub");
 });
 
-test("Mutagen SSH endpoint brackets IPv6 hosts", () => {
+test("Mutagen rejects literal IPv6 and asks for an SSH alias", () => {
   const worker = { user: "me", host: "fd7a:115c:a1e0::1", target: "me@fd7a:115c:a1e0::1", port: 22 };
-  assert.equal(mutagenEndpoint(worker, "hn/main/GitHub"), "me@[fd7a:115c:a1e0::1]:hn/main/GitHub");
+  assert.throws(
+    () => mutagenEndpoint(worker, "hn/main/GitHub"),
+    /SSH hostname\/alias/,
+  );
 });
 
 test("sync session identity changes when target changes", () => {
