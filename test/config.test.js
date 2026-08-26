@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizeConfig } from "../src/config.js";
 
-test("legacy worker-bound workspaces migrate to defaultWorker", () => {
+test("legacy worker-bound workspaces migrate to a global active target", () => {
   const config = normalizeConfig({
     workers: { pc: { target: "me@pc", host: "pc", port: 22 } },
     workspaces: {
@@ -12,8 +12,9 @@ test("legacy worker-bound workspaces migrate to defaultWorker", () => {
       },
     },
   });
-  assert.equal(config.workspaces.main.defaultWorker, "pc");
-  assert.equal(config.workspaces.main.roots[0].remote, "hn/main/GitHub");
+  assert.deepEqual(config.workspaces.main, {
+    roots: [{ local: "/tmp/GitHub", remote: "hn/main/GitHub" }],
+  });
   assert.equal(config.activeTarget, "pc");
 });
 
