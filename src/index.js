@@ -10,6 +10,7 @@ import {
   setActiveTarget,
 } from "./config.js";
 import { augmentAgentCommand } from "./agent.js";
+import { ensureControllerSshKey, windowsPairCommand } from "./pair.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
 import { addWorker, addWorkspaceRoot, createWorkspace } from "./workspace.js";
 import { bootstrapWorker, detectWorker, doctorWorker, ensureRemoteDirectories } from "./worker.js";
@@ -54,9 +55,15 @@ Everyday:
   hn exec npm test      one-shot remote command
   hn port 5173          remote 5173 -> local 5173
 
-One-time setup:
+Windows setup:
+  hn worker pair pc <user@host[:port]>
+  # paste the generated command once in Windows PowerShell as Administrator
+  hn worker finish pc
+
+Already have key-based SSH:
   hn worker add pc <user@host[:port]>
-  hn worker add aws <user@host[:port]>
+
+Workspace setup:
   hn workspace add main ~/GitHub
   hn workspace add main ~/Obsidian
   hn workspace add main ~/Downloads
@@ -77,13 +84,13 @@ function requireArgs(args, count, usage) {
 
 function targetFor(config) {
   const name = resolveActiveTargetName(config);
-  if (!name) fail("No compute target configured. Run: hn worker add pc user@host");
+  if (!name) fail("No compute target configured. Run: hn worker pair pc user@host");
   return { name, worker: requireWorker(config, name) };
 }
 
 function persistWorkerMetadata(config, name, worker) {
   const previous = config.workers[name] ?? {};
-  if (previous.platform !== worker.platform || previous.arch !== worker.arch) {
+  if (previous.platform !== worker.platform || previous.arch !== worker.arch || previous.pending !== worker.pending) {
     config.workers[name] = worker;
     saveConfig(config);
   }
@@ -92,6 +99,7 @@ function persistWorkerMetadata(config, name, worker) {
 
 function prepareTarget(config, name, { quiet = true } = {}) {
   const worker = requireWorker(config, name);
+  if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
   const prepared = bootstrapWorker(worker, { quiet });
   return persistWorkerMetadata(config, name, prepared);
 }
@@ -140,13 +148,15 @@ function printStatus(config, workspaceName = undefined) {
 
   if (!targetName) {
     console.log("target     —");
-    console.log("setup      hn worker add pc user@host");
+    console.log("setup      hn worker pair pc user@host");
     return;
   }
 
   const worker = requireWorker(config, targetName);
-  const ssh = testSsh(worker);
-  const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : "unknown";
+  const ssh = worker.pending
+    ? { code: 1 }
+    : testSsh(worker);
+  const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : (worker.pending ? "pairing" : "unknown");
   console.log(`target     ${targetName} ${ssh.code === 0 ? "✓" : "✗"}  ${platform}`);
 
   if (!workspace) {
@@ -181,12 +191,47 @@ function selectTarget(config, nameInput, { quiet = false } = {}) {
   return name;
 }
 
-function addTarget(config, nameInput, targetInput) {
+function validateTargetName(nameInput) {
   const name = normalizeName(nameInput, "target name");
   if (RESERVED_COMMANDS.has(name)) fail(`'${name}' is reserved and cannot be a target name.`);
+  return name;
+}
+
+function pairTarget(config, nameInput, targetInput) {
+  const name = validateTargetName(nameInput);
+  const base = parseSshTarget(targetInput);
+  const key = ensureControllerSshKey();
+  addWorker(config, name, { ...base, pending: true });
+
+  console.log(key.created ? `created SSH key ${key.privateKey}` : `using SSH key ${key.privateKey}`);
+  console.log("\nOn Windows: open PowerShell as Administrator and paste this ONE command:\n");
+  console.log(windowsPairCommand(key.publicKey));
+  console.log(`\nThen back on this Mac run:\n  hn worker finish ${name}`);
+}
+
+function finishTarget(config, nameInput) {
+  const name = normalizeName(nameInput, "target name");
+  const worker = requireWorker(config, name);
+  const ssh = testSsh(worker);
+  if (ssh.code !== 0) {
+    fail(`Pairing is not complete for '${name}'. Run the generated Windows PowerShell command, then retry 'hn worker finish ${name}'.`);
+  }
+
+  const detected = { ...worker, ...detectWorker(worker) };
+  delete detected.pending;
+  const prepared = bootstrapWorker(detected, { quiet: true });
+  config.workers[name] = prepared;
+  saveConfig(config);
+  console.log(`${name} ✓  ${prepared.platform}/${prepared.arch}  ${prepared.target}${prepared.port !== 22 ? `:${prepared.port}` : ""}`);
+}
+
+function addTarget(config, nameInput, targetInput) {
+  const name = validateTargetName(nameInput);
   const base = parseSshTarget(targetInput);
   const ssh = testSsh(base);
-  if (ssh.code !== 0) fail(`SSH is not working for ${targetInput}: ${(ssh.stderr || ssh.stdout).trim()}`);
+  if (ssh.code !== 0) {
+    fail(`SSH is not working for ${targetInput}. For a new Windows worker use: hn worker pair ${name} ${targetInput}`);
+  }
   const worker = { ...base, ...detectWorker(base) };
   const prepared = bootstrapWorker(worker, { quiet: true });
   addWorker(config, name, prepared);
@@ -245,7 +290,7 @@ async function main() {
     if (!args.length) return;
     [command, ...args] = args;
   } else if (TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
-    fail(`Target '${possibleTarget}' is not configured. Run: hn worker add ${possibleTarget} user@host`);
+    fail(`Target '${possibleTarget}' is not configured. Run: hn worker pair ${possibleTarget} user@host`);
   }
 
   if (command === "status") {
@@ -257,6 +302,7 @@ async function main() {
     const name = args[0] ? normalizeName(args[0], "target name") : resolveActiveTargetName(config);
     if (!name) fail("No target configured.");
     const worker = requireWorker(config, name);
+    if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
     const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
     persistWorkerMetadata(config, name, metadata);
     printWorkerChecks(name, doctorWorker(metadata));
@@ -265,6 +311,16 @@ async function main() {
 
   if (command === "worker") {
     const [sub, ...rest] = args;
+    if (sub === "pair") {
+      requireArgs(rest, 2, "hn worker pair <name> <user@host[:port]>");
+      pairTarget(config, rest[0], rest[1]);
+      return;
+    }
+    if (sub === "finish") {
+      requireArgs(rest, 1, "hn worker finish <name>");
+      finishTarget(config, rest[0]);
+      return;
+    }
     if (sub === "add") {
       requireArgs(rest, 2, "hn worker add <name> <user@host[:port]>");
       addTarget(config, rest[0], rest[1]);
@@ -282,6 +338,7 @@ async function main() {
       requireArgs(rest, 1, "hn worker doctor <name>");
       const name = normalizeName(rest[0], "target name");
       const worker = requireWorker(config, name);
+      if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
       const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
       persistWorkerMetadata(config, name, metadata);
       printWorkerChecks(name, doctorWorker(metadata));
@@ -292,12 +349,12 @@ async function main() {
       if (!entries.length) console.log("No targets configured.");
       for (const [name, worker] of entries) {
         const active = config.activeTarget === name ? "*" : " ";
-        const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : "unknown";
+        const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : (worker.pending ? "pairing" : "unknown");
         console.log(`${active} ${name}\t${platform}\t${worker.target}${worker.port !== 22 ? `:${worker.port}` : ""}`);
       }
       return;
     }
-    fail("Usage: hn worker <add|bootstrap|doctor|list> ...");
+    fail("Usage: hn worker <pair|finish|add|bootstrap|doctor|list> ...");
   }
 
   if (command === "workspace") {
@@ -378,7 +435,7 @@ async function main() {
 
   if (command === "shell") {
     const context = currentContext(config);
-    if (context.worker.platform) {
+    if (context.worker.platform && !context.worker.pending) {
       runPersistent(config, shellCommand(context.worker));
     } else {
       const worker = prepareTarget(config, context.targetName);
