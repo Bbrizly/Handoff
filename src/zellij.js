@@ -8,10 +8,19 @@ function zellijPowerShellExpression() {
   return `(Join-Path $HOME '.hn\\bin\\zellij.exe')`;
 }
 
+export function windowsZellijRuntimeSetup() {
+  return `
+$hnZellijSocketDir = Join-Path $HOME '.hn\\zellij-sockets'
+New-Item -ItemType Directory -Force -Path $hnZellijSocketDir | Out-Null
+$env:ZELLIJ_SOCKET_DIR = $hnZellijSocketDir
+`;
+}
+
 function runZellij(worker, args, options = {}) {
   if (worker.platform === "windows") {
     const literals = args.map(quotePowerShell).join(", ");
     const script = `
+${windowsZellijRuntimeSetup()}
 $z = ${zellijPowerShellExpression()}
 $hnArgs = @(${literals})
 & $z @hnArgs
@@ -56,7 +65,6 @@ export function parsePaneListOutput(output) {
     const parsed = JSON.parse(text);
     return Array.isArray(parsed) ? parsed : null;
   } catch {
-    // Be tolerant of harmless wrapper noise around otherwise-valid JSON.
     const start = text.indexOf("[");
     const end = text.lastIndexOf("]");
     if (start < 0 || end < start) return null;
@@ -110,10 +118,28 @@ function killSession(worker, sessionName) {
 }
 
 function createBackgroundSession(worker, sessionName) {
-  runZellij(worker, ["attach", "--create-background", sessionName], { capture: true });
-  const inspection = inspectSession(worker, sessionName, { attempts: 20, delayMs: 100 });
+  // Native Windows Zellij uses ConPTY and local IPC. Force a PTY for initial
+  // creation and pin ZELLIJ_SOCKET_DIR (via runZellij) so later SSH commands
+  // discover the same session instead of inheriting a different temp runtime.
+  const created = runZellij(
+    worker,
+    ["attach", "--create-background", sessionName],
+    {
+      capture: true,
+      allowFailure: true,
+      tty: worker.platform === "windows",
+    },
+  );
+  if (created.code !== 0) {
+    fail(`Zellij session '${sessionName}' could not be created (${diagnosticText(created)}).`);
+  }
+
+  const inspection = inspectSession(worker, sessionName, { attempts: 30, delayMs: 100 });
   if (!inspection.panes) {
-    fail(`Zellij session '${sessionName}' was created but could not be inspected (${diagnosticText(inspection.result)}).`);
+    const listed = runZellij(worker, ["list-sessions"], { capture: true, allowFailure: true });
+    fail(
+      `Zellij session '${sessionName}' was created but could not be inspected (${diagnosticText(inspection.result)}; list-sessions: ${diagnosticText(listed)}).`,
+    );
   }
   return inspection.panes;
 }
@@ -148,8 +174,6 @@ exit $LASTEXITCODE
 
 function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, paneName) {
   if (worker.platform === "windows") {
-    // Resolve .exe/.cmd/.bat applications before PowerShell script shims so
-    // npm-installed tools still work under restrictive execution policies.
     const paneCommand = windowsCommandRunner(commandArgs);
     const elements = [
       quotePowerShell("--session"),
@@ -169,6 +193,7 @@ function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, p
     ];
     const script = `
 $ErrorActionPreference = 'Stop'
+${windowsZellijRuntimeSetup()}
 $z = ${zellijPowerShellExpression()}
 $hnCwd = ${remotePathExpression(remoteCwd)}
 $hnArgs = @(${elements.join(", ")})
@@ -199,7 +224,7 @@ export function ensurePersistentCommand(worker, sessionName, remoteCwd, commandA
   if (!initialPane) fail(`Zellij session '${sessionName}' has no terminal pane.`);
 
   startCommandPane(worker, sessionName, initialPane.id, remoteCwd, commandArgs, paneName);
-  inspection = inspectSession(worker, sessionName, { attempts: 20, delayMs: 100 });
+  inspection = inspectSession(worker, sessionName, { attempts: 30, delayMs: 100 });
   if (!inspection.panes?.some((pane) => paneMatchesCommand(pane, commandArgs, paneName))) {
     fail(`Remote command '${commandArgs[0]}' did not start inside Zellij (${diagnosticText(inspection.result)}).`);
   }
@@ -208,6 +233,7 @@ export function ensurePersistentCommand(worker, sessionName, remoteCwd, commandA
 export function attachSession(worker, sessionName) {
   if (worker.platform === "windows") {
     const script = `
+${windowsZellijRuntimeSetup()}
 $z = ${zellijPowerShellExpression()}
 & $z attach ${quotePowerShell(sessionName)}
 exit $LASTEXITCODE

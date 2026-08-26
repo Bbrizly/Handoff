@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { paneMatchesCommand, parsePaneListOutput, sessionNameFor } from "../src/zellij.js";
+import {
+  paneMatchesCommand,
+  parsePaneListOutput,
+  sessionNameFor,
+  windowsZellijRuntimeSetup,
+} from "../src/zellij.js";
 
 const project = "/Users/me/GitHub/Palmier";
 
@@ -49,4 +54,11 @@ test("pane JSON parser tolerates harmless wrapper noise", () => {
 
 test("pane JSON parser rejects non-JSON output", () => {
   assert.equal(parsePaneListOutput("session is still starting"), null);
+});
+
+test("Windows Zellij uses one stable Handoff-owned socket directory", () => {
+  const setup = windowsZellijRuntimeSetup();
+  assert.match(setup, /ZELLIJ_SOCKET_DIR/);
+  assert.match(setup, /\.hn\\zellij-sockets/);
+  assert.match(setup, /New-Item -ItemType Directory -Force/);
 });
