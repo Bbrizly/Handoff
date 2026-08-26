@@ -91,7 +91,12 @@ function windowsCommandRunner(commandArgs) {
 $ErrorActionPreference = 'Stop'
 $cmd = ${quotePowerShell(command)}
 $hnArgs = @(${rest})
-& $cmd @hnArgs
+$application = Get-Command $cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($application) {
+  & $application.Source @hnArgs
+} else {
+  & $cmd @hnArgs
+}
 exit $LASTEXITCODE
 `;
   return ["powershell.exe", "-NoLogo", "-NoProfile", "-EncodedCommand", encodePowerShell(script)];
@@ -99,8 +104,8 @@ exit $LASTEXITCODE
 
 function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, paneName) {
   if (worker.platform === "windows") {
-    // Always launch through PowerShell so native executables, .cmd shims (npm,
-    // Claude/Codex installs), aliases, and built-ins resolve consistently.
+    // Resolve .exe/.cmd/.bat applications before PowerShell script shims so
+    // npm-installed tools still work under restrictive execution policies.
     const paneCommand = windowsCommandRunner(commandArgs);
     const elements = [
       quotePowerShell("--session"),
