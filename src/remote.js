@@ -13,17 +13,28 @@ cd -- "$hn_cwd"
 `;
 }
 
+function windowsInvocation(command, args) {
+  const rest = args.map(quotePowerShell).join(", ");
+  return `
+$cmd = ${quotePowerShell(command)}
+$hnArgs = @(${rest})
+$application = Get-Command $cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($application) {
+  & $application.Source @hnArgs
+} else {
+  & $cmd @hnArgs
+}
+exit $LASTEXITCODE
+`;
+}
+
 export function runRemoteCommand(worker, remoteCwd, commandArgs) {
   if (worker.platform === "windows") {
-    const command = commandArgs[0];
-    const rest = commandArgs.slice(1).map(quotePowerShell).join(", ");
+    const [command, ...args] = commandArgs;
     const script = `
 $ErrorActionPreference = 'Stop'
 Set-Location ${remotePathExpression(remoteCwd)}
-$cmd = ${quotePowerShell(command)}
-$hnArgs = @(${rest})
-& $cmd @hnArgs
-exit $LASTEXITCODE
+${windowsInvocation(command, args)}
 `;
     return runPowerShell(worker, script);
   }
