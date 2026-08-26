@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { shortHash, fail } from "./util.js";
+import { shortHash, fail, quotePosix } from "./util.js";
 
 const DEFAULT_IGNORES = [
   "node_modules/",
@@ -15,22 +15,33 @@ const DEFAULT_IGNORES = [
   ".DS_Store",
 ];
 
-function commandExists(command) {
-  return spawnSync("sh", ["-lc", `command -v ${command}`], { stdio: "ignore" }).status === 0;
+export function commandExists(command) {
+  if (process.platform === "win32") {
+    return spawnSync("where", [command], { stdio: "ignore" }).status === 0;
+  }
+  return spawnSync("sh", ["-lc", `command -v ${quotePosix(command)}`], { stdio: "ignore" }).status === 0;
+}
+
+export function isMutagenInstalled() {
+  return commandExists("mutagen");
 }
 
 export function ensureMutagen() {
-  if (commandExists("mutagen")) return;
+  if (isMutagenInstalled()) return;
   if (process.platform === "darwin" && commandExists("brew")) {
-    console.log("Mutagen is missing; installing it with Homebrew...");
+    console.log("setting up Mutagen on this Mac...");
     const result = spawnSync("brew", ["install", "mutagen-io/mutagen/mutagen"], { stdio: "inherit" });
-    if (result.status === 0 && commandExists("mutagen")) return;
+    if (result.status === 0 && isMutagenInstalled()) return;
   }
-  fail("Mutagen is required on the controller. Install it and retry.");
+  fail("Mutagen is required on the controller. Install Mutagen and retry.");
 }
 
-function runMutagen(args, { capture = false, allowFailure = false } = {}) {
-  ensureMutagen();
+function runMutagen(args, { capture = false, allowFailure = false, ensure = true } = {}) {
+  if (ensure) ensureMutagen();
+  if (!isMutagenInstalled()) {
+    return { code: 127, stdout: "", stderr: "Mutagen is not installed" };
+  }
+
   const result = spawnSync("mutagen", args, {
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: capture ? "utf8" : undefined,
@@ -44,27 +55,34 @@ function runMutagen(args, { capture = false, allowFailure = false } = {}) {
   return { code, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-function sessionNames(kind) {
+function sessionNames(kind, { ensure = true } = {}) {
   const result = runMutagen(
     [kind, "list", "--template", "{{range .}}{{.Name}}\\n{{end}}"],
-    { capture: true, allowFailure: true },
+    { capture: true, allowFailure: true, ensure },
   );
   if (result.code !== 0) return [];
   return result.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
 }
 
+function endpointHost(worker) {
+  const host = worker.host.includes(":") ? `[${worker.host}]` : worker.host;
+  return `${worker.user ? `${worker.user}@` : ""}${host}${worker.port && worker.port !== 22 ? `:${worker.port}` : ""}`;
+}
+
 export function mutagenEndpoint(worker, remotePath) {
-  return worker.port && worker.port !== 22
-    ? `${worker.target}:${worker.port}:${remotePath}`
-    : `${worker.target}:${remotePath}`;
+  return `${endpointHost(worker)}:${remotePath}`;
 }
 
-export function syncSessionName(workspaceName, root) {
-  return `handoff-sync-${shortHash(`${workspaceName}:${root.local}:${root.remote}`)}`;
+export function workerIdentity(worker) {
+  return `${worker.user ?? ""}@${worker.host}:${worker.port ?? 22}`;
 }
 
-export function ensureSyncRoot(workspaceName, worker, root) {
-  const name = syncSessionName(workspaceName, root);
+export function syncSessionName(workspaceName, targetName, worker, root) {
+  return `hn-sync-${shortHash(`${workspaceName}:${targetName}:${workerIdentity(worker)}:${root.local}:${root.remote}`)}`;
+}
+
+export function ensureSyncRoot(workspaceName, targetName, worker, root) {
+  const name = syncSessionName(workspaceName, targetName, worker, root);
   if (sessionNames("sync").includes(name)) {
     runMutagen(["sync", "resume", name], { capture: true, allowFailure: true });
     return name;
@@ -77,16 +95,38 @@ export function ensureSyncRoot(workspaceName, worker, root) {
   return name;
 }
 
+export function getSyncStatus(name) {
+  if (!isMutagenInstalled()) return { state: "mutagen-missing", conflicts: 0 };
+  if (!sessionNames("sync", { ensure: false }).includes(name)) {
+    return { state: "not-started", conflicts: 0 };
+  }
+
+  const result = runMutagen(
+    ["sync", "list", name, "--template", "{{range .}}{{.Status.Description}}|{{len .Conflicts}}{{end}}"],
+    { capture: true, allowFailure: true, ensure: false },
+  );
+  if (result.code !== 0) return { state: "error", conflicts: 0 };
+  const [description = "unknown", conflictText = "0"] = result.stdout.trim().split("|");
+  return {
+    state: description.trim().toLowerCase() || "unknown",
+    conflicts: Number.parseInt(conflictText, 10) || 0,
+  };
+}
+
 export function showSyncStatus(name) {
-  if (!sessionNames("sync").includes(name)) {
+  if (!isMutagenInstalled()) {
+    console.log("  Mutagen not installed");
+    return;
+  }
+  if (!sessionNames("sync", { ensure: false }).includes(name)) {
     console.log("  not started");
     return;
   }
-  runMutagen(["sync", "list", name]);
+  runMutagen(["sync", "list", name], { ensure: false });
 }
 
 export function ensureForward(worker, key, remotePort, localPort = remotePort) {
-  const name = `handoff-port-${shortHash(`${key}:${remotePort}:${localPort}`)}`;
+  const name = `hn-port-${shortHash(`${workerIdentity(worker)}:${key}:${remotePort}:${localPort}`)}`;
   if (sessionNames("forward").includes(name)) {
     runMutagen(["forward", "resume", name], { capture: true, allowFailure: true });
     return name;

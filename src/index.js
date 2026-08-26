@@ -1,37 +1,73 @@
 #!/usr/bin/env node
 
-import { loadConfig, requireWorker, requireWorkspace } from "./config.js";
+import { basename } from "node:path";
+import {
+  loadConfig,
+  requireWorker,
+  requireWorkspace,
+  resolveActiveTargetName,
+  saveConfig,
+  setActiveTarget,
+} from "./config.js";
+import { augmentAgentCommand } from "./agent.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
 import { addWorker, addWorkspaceRoot, createWorkspace } from "./workspace.js";
-import { bootstrapWorker, doctorWorker } from "./worker.js";
-import { ensureForward, ensureSyncRoot, showSyncStatus, syncSessionName } from "./mutagen.js";
-import { findContext, mapLocalToRemote } from "./resolve.js";
-import { attachSession, ensurePersistentCommand, listSessions, sessionNameFor } from "./zellij.js";
+import { bootstrapWorker, detectWorker, doctorWorker, ensureRemoteDirectories } from "./worker.js";
+import {
+  ensureForward,
+  ensureSyncRoot,
+  getSyncStatus,
+  isMutagenInstalled,
+  showSyncStatus,
+  syncSessionName,
+} from "./mutagen.js";
+import { findContext, mapLocalToRemote, tryFindContext } from "./resolve.js";
+import {
+  attachSession,
+  ensurePersistentCommand,
+  listSessions,
+  newSessionToken,
+  sessionNameFor,
+  shellCommand,
+} from "./zellij.js";
 import { runRemoteCommand } from "./remote.js";
-import { fail } from "./util.js";
+import { fail, normalizeName } from "./util.js";
+
+const RESERVED_COMMANDS = new Set([
+  "help", "status", "doctor", "worker", "workspace", "sync", "sessions", "attach",
+  "port", "exec", "shell", "new",
+]);
+const TARGET_HINTS = new Set(["home", "pc", "aws"]);
 
 function help() {
-  console.log(`Handoff - local files, remote compute
+  console.log(`hn - local files, compute anywhere
 
-Setup:
-  handoff worker add <name> <user@host[:port]>
-  handoff workspace create <name> <worker>
-  handoff workspace add <workspace> <local-path> [remote-path]
+Everyday:
+  hn                    status
+  hn pc                 switch active target
+  hn aws claude         switch target + launch Claude
+  hn claude             persistent Claude in this project
+  hn codex              persistent Codex in this project
+  hn new claude         start another Claude session
+  hn shell              persistent remote shell
+  hn npm run dev        persistent arbitrary command
+  hn exec npm test      one-shot remote command
+  hn port 5173          remote 5173 -> local 5173
 
-Use from inside a configured root:
-  handoff claude
-  handoff codex
-  handoff npm run dev
-  handoff exec <command...>
-  handoff port <remote-port> [local-port]
+One-time setup:
+  hn worker add pc <user@host[:port]>
+  hn worker add aws <user@host[:port]>
+  hn workspace add main ~/GitHub
+  hn workspace add main ~/Obsidian
+  hn workspace add main ~/Downloads
 
 Inspect:
-  handoff worker list
-  handoff worker doctor <name>
-  handoff sync [workspace]
-  handoff status [workspace]
-  handoff sessions
-  handoff attach <session>
+  hn doctor [target]
+  hn worker list
+  hn workspace list
+  hn sync [workspace]
+  hn sessions
+  hn attach <session>
 `);
 }
 
@@ -39,166 +75,321 @@ function requireArgs(args, count, usage) {
   if (args.length < count) fail(`Usage: ${usage}`);
 }
 
-function currentContext(config, workspaceName) {
+function targetFor(config, workspace = null) {
+  const name = resolveActiveTargetName(config, workspace);
+  if (!name) fail("No compute target configured. Run: hn worker add pc user@host");
+  return { name, worker: requireWorker(config, name) };
+}
+
+function persistWorkerMetadata(config, name, worker) {
+  const previous = config.workers[name] ?? {};
+  if (previous.platform !== worker.platform || previous.arch !== worker.arch) {
+    config.workers[name] = worker;
+    saveConfig(config);
+  }
+  return worker;
+}
+
+function prepareTarget(config, name, { quiet = true } = {}) {
+  const worker = requireWorker(config, name);
+  const prepared = bootstrapWorker(worker, { quiet });
+  return persistWorkerMetadata(config, name, prepared);
+}
+
+function currentContext(config, workspaceName = undefined) {
   const context = findContext(config, process.cwd(), workspaceName);
-  const worker = requireWorker(config, context.workspace.worker);
-  return { ...context, worker };
+  const target = targetFor(config, context.workspace);
+  return { ...context, targetName: target.name, worker: target.worker };
 }
 
-function ensureCurrentSync(context) {
-  return ensureSyncRoot(context.name, context.worker, context.root);
+function workspaceSalt(workspace) {
+  return (workspace.roots ?? [])
+    .map((root) => `${root.local}->${root.remote}`)
+    .sort()
+    .join("\u0000");
 }
 
-function printWorkerChecks(name, checks) {
-  console.log(`${name}:`);
-  for (const [key, value] of Object.entries(checks)) {
-    console.log(`  ${value ? "✓" : "✗"} ${key}`);
+function ensureWorkspaceSync(context) {
+  ensureRemoteDirectories(context.worker, context.workspace.roots.map((root) => root.remote));
+  for (const root of context.workspace.roots) {
+    ensureSyncRoot(context.name, context.targetName, context.worker, root);
   }
 }
 
+function syncStatusText(status) {
+  if (status.conflicts > 0) return `⚠ ${status.conflicts} conflict${status.conflicts === 1 ? "" : "s"}`;
+  if (status.state === "mutagen-missing" || status.state === "not-started") return "—";
+  if (status.state.includes("watching")) return "✓";
+  if (["scanning", "staging", "reconciling", "saving"].some((value) => status.state.includes(value))) return "…";
+  if (status.state.includes("disconnected") || status.state === "error") return "✗";
+  return status.state || "?";
+}
+
+function printStatus(config, workspaceName = undefined) {
+  let context = workspaceName
+    ? tryFindContext(config, process.cwd(), workspaceName)
+    : tryFindContext(config, process.cwd());
+  const workspace = workspaceName
+    ? requireWorkspace(config, workspaceName)
+    : context?.workspace ?? null;
+  const targetName = resolveActiveTargetName(config, workspace);
+
+  if (!targetName) {
+    console.log("target     —");
+    console.log("setup      hn worker add pc user@host");
+    return;
+  }
+
+  const worker = requireWorker(config, targetName);
+  const ssh = testSsh(worker);
+  const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : "unknown";
+  console.log(`target     ${targetName} ${ssh.code === 0 ? "✓" : "✗"}  ${platform}`);
+
+  if (!workspace) {
+    console.log("workspace  —");
+    return;
+  }
+
+  const resolvedWorkspaceName = workspaceName ?? context.name;
+  console.log(`workspace  ${resolvedWorkspaceName}`);
+  if (context) console.log(`project    ${basename(context.projectLocal)}`);
+
+  for (const root of workspace.roots ?? []) {
+    const session = syncSessionName(resolvedWorkspaceName, targetName, worker, root);
+    const status = getSyncStatus(session);
+    console.log(`sync       ${syncStatusText(status)}  ${basename(root.local)}`);
+  }
+}
+
+function printWorkerChecks(name, checks) {
+  console.log(`${name}  ${checks.platform}/${checks.arch}`);
+  for (const key of ["ssh", "zellij", "claude", "codex", "node"]) {
+    console.log(`  ${checks[key] ? "✓" : "✗"} ${key}`);
+  }
+  console.log(`  ${isMutagenInstalled() ? "✓" : "✗"} mutagen (controller)`);
+}
+
+function activateTarget(config, nameInput, { quiet = false } = {}) {
+  const name = normalizeName(nameInput, "target name");
+  let worker = requireWorker(config, name);
+  worker = bootstrapWorker(worker, { quiet: true });
+  config.workers[name] = worker;
+  setActiveTarget(config, name);
+  if (!quiet) console.log(`${name} ✓  ${worker.platform}/${worker.arch}`);
+  return worker;
+}
+
+function addTarget(config, nameInput, targetInput) {
+  const name = normalizeName(nameInput, "target name");
+  if (RESERVED_COMMANDS.has(name)) fail(`'${name}' is reserved and cannot be a target name.`);
+  const base = parseSshTarget(targetInput);
+  const ssh = testSsh(base);
+  if (ssh.code !== 0) fail(`SSH is not working for ${targetInput}: ${(ssh.stderr || ssh.stdout).trim()}`);
+  const worker = { ...base, ...detectWorker(base) };
+  const prepared = bootstrapWorker(worker, { quiet: true });
+  addWorker(config, name, prepared);
+  config.activeTarget = name;
+  saveConfig(config);
+  console.log(`${name} ✓  ${prepared.platform}/${prepared.arch}  ${prepared.target}${prepared.port !== 22 ? `:${prepared.port}` : ""}`);
+}
+
+function syncWholeWorkspace(config, workspaceName, workspace) {
+  const target = targetFor(config, workspace);
+  const worker = prepareTarget(config, target.name);
+  ensureRemoteDirectories(worker, workspace.roots.map((root) => root.remote));
+  for (const root of workspace.roots) {
+    ensureSyncRoot(workspaceName, target.name, worker, root);
+  }
+}
+
+function runPersistent(config, commandArgs, { unique = false } = {}) {
+  let context = currentContext(config);
+  const worker = prepareTarget(config, context.targetName);
+  context = { ...context, worker };
+  ensureWorkspaceSync(context);
+
+  const remoteCwd = mapLocalToRemote(context.root, process.cwd());
+  const remoteArgs = augmentAgentCommand(commandArgs, context.workspace, remoteCwd);
+  const sessionName = sessionNameFor(
+    context.name,
+    context.projectLocal,
+    commandArgs,
+    workspaceSalt(context.workspace),
+    unique ? newSessionToken() : "",
+  );
+  ensurePersistentCommand(worker, sessionName, remoteCwd, remoteArgs);
+  attachSession(worker, sessionName);
+}
+
 async function main() {
-  const argv = process.argv.slice(2);
-  if (!argv.length || ["help", "--help", "-h"].includes(argv[0])) {
+  let argv = process.argv.slice(2);
+  if (["help", "--help", "-h"].includes(argv[0])) {
     help();
     return;
   }
 
   const config = loadConfig();
-  const [command, ...args] = argv;
+  if (!argv.length) {
+    printStatus(config);
+    return;
+  }
+
+  let [command, ...args] = argv;
+  const possibleTarget = String(command).toLowerCase();
+  if (!RESERVED_COMMANDS.has(possibleTarget) && config.workers[possibleTarget]) {
+    activateTarget(config, possibleTarget);
+    if (!args.length) return;
+    [command, ...args] = args;
+  } else if (!args.length && TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
+    fail(`Target '${possibleTarget}' is not configured. Run: hn worker add ${possibleTarget} user@host`);
+  }
+
+  if (command === "status") {
+    printStatus(config, args[0]);
+    return;
+  }
+
+  if (command === "doctor") {
+    const name = args[0] ? normalizeName(args[0], "target name") : resolveActiveTargetName(config);
+    if (!name) fail("No target configured.");
+    const worker = requireWorker(config, name);
+    const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
+    persistWorkerMetadata(config, name, metadata);
+    printWorkerChecks(name, doctorWorker(metadata));
+    return;
+  }
 
   if (command === "worker") {
     const [sub, ...rest] = args;
     if (sub === "add") {
-      requireArgs(rest, 2, "handoff worker add <name> <user@host[:port]>");
-      const [name, target] = rest;
-      const worker = parseSshTarget(target);
-      const ssh = testSsh(worker);
-      if (ssh.code !== 0) fail(`SSH is not working for ${target}: ${ssh.stderr.trim()}`);
-      addWorker(config, name, worker);
-      bootstrapWorker(worker);
-      console.log(`Added worker '${name}'.`);
+      requireArgs(rest, 2, "hn worker add <name> <user@host[:port]>");
+      addTarget(config, rest[0], rest[1]);
       return;
     }
     if (sub === "bootstrap") {
-      requireArgs(rest, 1, "handoff worker bootstrap <name>");
-      bootstrapWorker(requireWorker(config, rest[0]));
+      requireArgs(rest, 1, "hn worker bootstrap <name>");
+      const name = normalizeName(rest[0], "target name");
+      const worker = prepareTarget(config, name, { quiet: false });
+      config.workers[name] = worker;
+      saveConfig(config);
       return;
     }
     if (sub === "doctor") {
-      requireArgs(rest, 1, "handoff worker doctor <name>");
-      printWorkerChecks(rest[0], doctorWorker(requireWorker(config, rest[0])));
+      requireArgs(rest, 1, "hn worker doctor <name>");
+      const name = normalizeName(rest[0], "target name");
+      const worker = requireWorker(config, name);
+      const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
+      persistWorkerMetadata(config, name, metadata);
+      printWorkerChecks(name, doctorWorker(metadata));
       return;
     }
     if (sub === "list") {
       const entries = Object.entries(config.workers);
-      if (!entries.length) console.log("No workers configured.");
-      for (const [name, worker] of entries) console.log(`${name}\t${worker.target}${worker.port !== 22 ? `:${worker.port}` : ""}`);
+      if (!entries.length) console.log("No targets configured.");
+      for (const [name, worker] of entries) {
+        const active = config.activeTarget === name ? "*" : " ";
+        const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : "unknown";
+        console.log(`${active} ${name}\t${platform}\t${worker.target}${worker.port !== 22 ? `:${worker.port}` : ""}`);
+      }
       return;
     }
-    fail("Usage: handoff worker <add|bootstrap|doctor|list> ...");
+    fail("Usage: hn worker <add|bootstrap|doctor|list> ...");
   }
 
   if (command === "workspace") {
     const [sub, ...rest] = args;
     if (sub === "create") {
-      requireArgs(rest, 2, "handoff workspace create <name> <worker>");
-      createWorkspace(config, rest[0], rest[1]);
-      console.log(`Created workspace '${rest[0]}'.`);
+      requireArgs(rest, 1, "hn workspace create <name> [default-target]");
+      const defaultTarget = rest[1] ? normalizeName(rest[1], "target name") : null;
+      const name = createWorkspace(config, rest[0], defaultTarget);
+      console.log(`created ${name}`);
       return;
     }
     if (sub === "add") {
-      requireArgs(rest, 2, "handoff workspace add <workspace> <local-path> [remote-path]");
+      requireArgs(rest, 2, "hn workspace add <workspace> <local-path> [remote-path]");
       const root = addWorkspaceRoot(config, rest[0], rest[1], rest[2]);
       console.log(`${root.local} <-> ${root.remote}`);
       return;
     }
     if (sub === "list") {
       for (const [name, workspace] of Object.entries(config.workspaces)) {
-        console.log(`${name} -> ${workspace.worker}`);
-        for (const root of workspace.roots) console.log(`  ${root.local} <-> ${root.remote}`);
+        console.log(`${name}${workspace.defaultWorker ? `  default:${workspace.defaultWorker}` : ""}`);
+        for (const root of workspace.roots ?? []) console.log(`  ${root.local} <-> ${root.remote}`);
       }
       return;
     }
-    fail("Usage: handoff workspace <create|add|list> ...");
+    fail("Usage: hn workspace <create|add|list> ...");
   }
 
   if (command === "sync") {
-    const workspaceName = args[0];
-    if (workspaceName) {
-      const workspace = requireWorkspace(config, workspaceName);
-      const worker = requireWorker(config, workspace.worker);
-      for (const root of workspace.roots) {
-        console.log(`Syncing ${root.local}...`);
-        ensureSyncRoot(workspaceName, worker, root);
-      }
+    if (args[0]) {
+      const workspaceName = normalizeName(args[0], "workspace name");
+      syncWholeWorkspace(config, workspaceName, requireWorkspace(config, workspaceName));
     } else {
       const context = currentContext(config);
-      ensureCurrentSync(context);
-    }
-    return;
-  }
-
-  if (command === "status") {
-    const workspaceName = args[0];
-    const workspace = workspaceName ? requireWorkspace(config, workspaceName) : currentContext(config).workspace;
-    const name = workspaceName ?? currentContext(config).name;
-    console.log(`${name} -> ${workspace.worker}`);
-    for (const root of workspace.roots) {
-      const session = syncSessionName(name, root);
-      console.log(`\n${root.local} <-> ${root.remote}`);
-      showSyncStatus(session);
+      syncWholeWorkspace(config, context.name, context.workspace);
     }
     return;
   }
 
   if (command === "sessions") {
-    const context = currentContext(config);
-    bootstrapWorker(context.worker, { quiet: true });
-    const result = listSessions(context.worker);
+    const target = targetFor(config);
+    const worker = prepareTarget(config, target.name);
+    const result = listSessions(worker);
     process.stdout.write(result.stdout || "No Zellij sessions.\n");
     return;
   }
 
   if (command === "attach") {
-    requireArgs(args, 1, "handoff attach <session>");
-    const context = currentContext(config);
-    bootstrapWorker(context.worker, { quiet: true });
-    attachSession(context.worker, args[0]);
+    requireArgs(args, 1, "hn attach <session>");
+    const target = targetFor(config);
+    const worker = prepareTarget(config, target.name);
+    attachSession(worker, args[0]);
     return;
   }
 
   if (command === "port") {
-    requireArgs(args, 1, "handoff port <remote-port> [local-port]");
+    requireArgs(args, 1, "hn port <remote-port> [local-port]");
     const context = currentContext(config);
+    const worker = prepareTarget(config, context.targetName);
     const remotePort = Number(args[0]);
     const localPort = args[1] ? Number(args[1]) : remotePort;
-    if (!Number.isInteger(remotePort) || !Number.isInteger(localPort)) fail("Ports must be integers.");
-    const name = ensureForward(context.worker, `${context.name}:${context.root.remote}`, remotePort, localPort);
-    console.log(`Forwarding Windows:${remotePort} -> localhost:${localPort} (${name})`);
+    if (![remotePort, localPort].every((port) => Number.isInteger(port) && port >= 1 && port <= 65535)) {
+      fail("Ports must be integers from 1 to 65535.");
+    }
+    const name = ensureForward(worker, `${context.name}:${context.root.remote}`, remotePort, localPort);
+    console.log(`${context.targetName}:${remotePort} -> localhost:${localPort}  (${name})`);
     return;
   }
 
   if (command === "exec") {
-    requireArgs(args, 1, "handoff exec <command...>");
-    const context = currentContext(config);
-    ensureCurrentSync(context);
+    requireArgs(args, 1, "hn exec <command...>");
+    let context = currentContext(config);
+    const worker = prepareTarget(config, context.targetName);
+    context = { ...context, worker };
+    ensureWorkspaceSync(context);
     const remoteCwd = mapLocalToRemote(context.root, process.cwd());
-    runRemoteCommand(context.worker, remoteCwd, args);
+    runRemoteCommand(worker, remoteCwd, augmentAgentCommand(args, context.workspace, remoteCwd));
     return;
   }
 
-  // Anything else is a persistent remote command.
-  const context = currentContext(config);
-  bootstrapWorker(context.worker, { quiet: true });
-  ensureCurrentSync(context);
-  const remoteCwd = mapLocalToRemote(context.root, process.cwd());
-  const commandArgs = [command, ...args];
-  const sessionName = sessionNameFor(context.name, context.root, commandArgs);
-  ensurePersistentCommand(context.worker, sessionName, remoteCwd, commandArgs);
-  attachSession(context.worker, sessionName);
+  if (command === "shell") {
+    const context = currentContext(config);
+    const worker = prepareTarget(config, context.targetName);
+    runPersistent(config, shellCommand(worker));
+    return;
+  }
+
+  if (command === "new") {
+    requireArgs(args, 1, "hn new <command...>");
+    runPersistent(config, args, { unique: true });
+    return;
+  }
+
+  runPersistent(config, [command, ...args]);
 }
 
 main().catch((error) => {
-  console.error(`handoff: ${error.message}`);
+  console.error(`hn: ${error.message}`);
   process.exit(1);
 });

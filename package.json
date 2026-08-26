@@ -1,17 +1,17 @@
 {
-  "name": "handoff",
-  "version": "0.0.1",
+  "name": "hn",
+  "version": "0.1.0",
   "private": true,
   "description": "Local-first remote execution over SSH with Mutagen and Zellij",
   "type": "module",
   "bin": {
-    "handoff": "./src/index.js"
+    "hn": "./src/index.js"
   },
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "check": "node src/index.js help",
+    "check": "node src/index.js --help && node src/index.js",
     "test": "node --test"
   },
   "license": "MIT"
