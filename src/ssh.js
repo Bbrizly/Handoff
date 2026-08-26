@@ -91,10 +91,20 @@ export function runSsh(worker, remoteArgs = [], { tty = false, capture = false, 
 }
 
 export function runPowerShell(worker, script, options = {}) {
-  const encoded = encodePowerShell(script);
+  const wrapped = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
+  const encoded = encodePowerShell(wrapped);
   return runSsh(
     worker,
-    ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+    [
+      "powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-OutputFormat",
+      "Text",
+      "-EncodedCommand",
+      encoded,
+    ],
     options,
   );
 }

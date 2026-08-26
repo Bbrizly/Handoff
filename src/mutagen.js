@@ -1,5 +1,25 @@
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { shortHash, fail, quotePosix } from "./util.js";
+
+const MUTAGEN_VERSION = "0.18.1";
+const MANAGED_MUTAGEN_DIR = join(homedir(), ".hn", "bin", `mutagen-v${MUTAGEN_VERSION}`);
+const MANAGED_MUTAGEN_BINARY = join(
+  MANAGED_MUTAGEN_DIR,
+  process.platform === "win32" ? "mutagen.exe" : "mutagen",
+);
+const MANAGED_MUTAGEN_AGENTS = join(MANAGED_MUTAGEN_DIR, "mutagen-agents.tar.gz");
 
 const DEFAULT_IGNORES = [
   "node_modules/",
@@ -22,27 +42,130 @@ export function commandExists(command) {
   return spawnSync("sh", ["-lc", `command -v ${quotePosix(command)}`], { stdio: "ignore" }).status === 0;
 }
 
+function managedMutagenReady() {
+  return existsSync(MANAGED_MUTAGEN_BINARY) && existsSync(MANAGED_MUTAGEN_AGENTS);
+}
+
+function mutagenCommand() {
+  if (managedMutagenReady()) return MANAGED_MUTAGEN_BINARY;
+  if (commandExists("mutagen")) return "mutagen";
+  return null;
+}
+
 export function isMutagenInstalled() {
-  return commandExists("mutagen");
+  return mutagenCommand() !== null;
+}
+
+export function mutagenReleaseAsset(platform = process.platform, arch = process.arch) {
+  const osName = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : null;
+  const archName = arch === "arm64" ? "arm64" : arch === "x64" ? "amd64" : null;
+  if (!osName || !archName) return null;
+  return `mutagen_${osName}_${archName}_v${MUTAGEN_VERSION}.tar.gz`;
+}
+
+export function checksumForAsset(contents, assetName) {
+  for (const rawLine of String(contents).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const match = line.match(/^([a-fA-F0-9]{64})\s+\*?(.+)$/);
+    if (match && match[2].trim() === assetName) return match[1].toLowerCase();
+  }
+  return null;
+}
+
+function sha256File(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function download(url, destination) {
+  if (!commandExists("curl")) {
+    fail("hn needs curl once to bootstrap Mutagen automatically.");
+  }
+  const result = spawnSync(
+    "curl",
+    ["-fsSL", "--retry", "3", "--retry-delay", "1", "-o", destination, url],
+    { stdio: ["ignore", "ignore", "pipe"], encoding: "utf8" },
+  );
+  if ((result.status ?? 1) !== 0) {
+    fail(`Unable to download Mutagen: ${(result.stderr || "curl failed").trim()}`);
+  }
+}
+
+function installManagedMutagen() {
+  const asset = mutagenReleaseAsset();
+  if (!asset) {
+    fail(`Automatic Mutagen setup is not supported on ${process.platform}/${process.arch}. Install Mutagen and retry.`);
+  }
+  if (!commandExists("tar")) {
+    fail("hn needs tar once to bootstrap Mutagen automatically.");
+  }
+
+  console.log(`setting up Mutagen ${MUTAGEN_VERSION}...`);
+  const stage = mkdtempSync(join(tmpdir(), "hn-mutagen-"));
+  const archive = join(stage, asset);
+  const sums = join(stage, "SHA256SUMS");
+  const base = `https://github.com/mutagen-io/mutagen/releases/download/v${MUTAGEN_VERSION}`;
+
+  try {
+    download(`${base}/SHA256SUMS`, sums);
+    download(`${base}/${asset}`, archive);
+
+    const expected = checksumForAsset(readFileSync(sums, "utf8"), asset);
+    if (!expected) fail(`Official Mutagen checksum for '${asset}' was not found.`);
+    const actual = sha256File(archive);
+    if (actual !== expected) {
+      fail(`Mutagen download checksum mismatch (expected ${expected}, got ${actual}).`);
+    }
+
+    const extracted = join(stage, "extracted");
+    mkdirSync(extracted, { recursive: true });
+    const unpack = spawnSync("tar", ["-xzf", archive, "-C", extracted], {
+      stdio: ["ignore", "ignore", "pipe"],
+      encoding: "utf8",
+    });
+    if ((unpack.status ?? 1) !== 0) {
+      fail(`Unable to unpack Mutagen: ${(unpack.stderr || "tar failed").trim()}`);
+    }
+
+    const binaryName = process.platform === "win32" ? "mutagen.exe" : "mutagen";
+    const extractedBinary = join(extracted, binaryName);
+    const extractedAgents = join(extracted, "mutagen-agents.tar.gz");
+    if (!existsSync(extractedBinary) || !existsSync(extractedAgents)) {
+      fail("Official Mutagen archive did not contain the expected binary and agent bundle.");
+    }
+
+    mkdirSync(MANAGED_MUTAGEN_DIR, { recursive: true });
+    copyFileSync(extractedBinary, MANAGED_MUTAGEN_BINARY);
+    copyFileSync(extractedAgents, MANAGED_MUTAGEN_AGENTS);
+    if (process.platform !== "win32") chmodSync(MANAGED_MUTAGEN_BINARY, 0o755);
+
+    const verified = spawnSync(MANAGED_MUTAGEN_BINARY, ["version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if ((verified.status ?? 1) !== 0 || !`${verified.stdout}${verified.stderr}`.includes(MUTAGEN_VERSION)) {
+      rmSync(MANAGED_MUTAGEN_DIR, { recursive: true, force: true });
+      fail("Mutagen was installed but failed its version check.");
+    }
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
 }
 
 export function ensureMutagen() {
   if (isMutagenInstalled()) return;
-  if (process.platform === "darwin" && commandExists("brew")) {
-    console.log("setting up Mutagen on this Mac...");
-    const result = spawnSync("brew", ["install", "mutagen-io/mutagen/mutagen"], { stdio: "inherit" });
-    if (result.status === 0 && isMutagenInstalled()) return;
-  }
-  fail("Mutagen is required on the controller. Install Mutagen and retry.");
+  installManagedMutagen();
+  if (!managedMutagenReady()) fail("Mutagen bootstrap did not complete successfully.");
 }
 
 function runMutagen(args, { capture = false, allowFailure = false, ensure = true } = {}) {
   if (ensure) ensureMutagen();
-  if (!isMutagenInstalled()) {
+  const command = mutagenCommand();
+  if (!command) {
     return { code: 127, stdout: "", stderr: "Mutagen is not installed" };
   }
 
-  const result = spawnSync("mutagen", args, {
+  const result = spawnSync(command, args, {
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: capture ? "utf8" : undefined,
   });
@@ -126,9 +249,6 @@ export function flushSyncSessions(names) {
   const sessions = [...new Set(names.filter(Boolean))];
   if (!sessions.length) return;
 
-  // Mutagen flush blocks until a synchronization cycle completes unless
-  // --skip-wait is supplied. This prevents remote commands from starting
-  // against an incomplete first sync or stale local edits.
   runMutagen(["sync", "flush", ...sessions], { capture: true });
 
   for (const name of sessions) {
