@@ -16,6 +16,64 @@ $env:ZELLIJ_SOCKET_DIR = $hnZellijSocketDir
 `;
 }
 
+export function windowsDetachedZellijLaunchScript(sessionName) {
+  const safeSession = slug(sessionName).slice(0, 80) || "session";
+  const childScript = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+${windowsZellijRuntimeSetup()}
+$z = ${zellijPowerShellExpression()}
+$logDir = Join-Path $HOME '.hn\\logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$logFile = Join-Path $logDir ${quotePowerShell(`zellij-create-${safeSession}.log`)}
+try {
+  $hnOutput = & $z attach --create-background ${quotePowerShell(sessionName)} 2>&1
+  $hnCode = $LASTEXITCODE
+  $hnOutput | Out-File -FilePath $logFile -Encoding utf8
+} catch {
+  $_ | Out-String | Out-File -FilePath $logFile -Encoding utf8
+  $hnCode = 1
+}
+# Keep this launcher alive briefly so the SSH-side caller can verify that WMI
+# created it in the expected user context before it exits.
+Start-Sleep -Milliseconds 800
+exit $hnCode
+`;
+  const encoded = encodePowerShell(childScript);
+
+  return `
+$ErrorActionPreference = 'Stop'
+$hnEnvironment = @(Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" })
+$startup = New-CimInstance -CimClass (Get-CimClass -ClassName Win32_ProcessStartup) -ClientOnly
+# Windows OpenSSH can tear down descendants when an exec channel closes. Spawn
+# the Zellij creator through WMI and explicitly request CREATE_BREAKAWAY_FROM_JOB
+# so the Zellij server is not owned by the short-lived sshd job/process tree.
+$startup.CreateFlags = [uint32]16777216
+$startup.ShowWindow = [uint16]0
+$startup.EnvironmentVariables = [string[]]$hnEnvironment
+$childPowerShell = Join-Path $PSHOME 'powershell.exe'
+$commandLine = '"' + $childPowerShell + '" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}'
+$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+  CommandLine = $commandLine
+  CurrentDirectory = $HOME
+  ProcessStartupInformation = $startup
+}
+if ($created.ReturnValue -ne 0) {
+  throw "Win32_Process.Create failed with return value $($created.ReturnValue)."
+}
+Start-Sleep -Milliseconds 120
+$spawned = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($created.ProcessId)" -ErrorAction SilentlyContinue
+if ($spawned) {
+  $owner = Invoke-CimMethod -InputObject $spawned -MethodName GetOwner -ErrorAction SilentlyContinue
+  if ($owner -and $owner.ReturnValue -eq 0 -and $owner.User -and $owner.User -ine $env:USERNAME) {
+    try { Invoke-CimMethod -InputObject $spawned -MethodName Terminate -Arguments @{ Reason = 1 } | Out-Null } catch {}
+    throw "Detached Zellij launcher ran as '$($owner.User)' instead of '$env:USERNAME'."
+  }
+}
+Write-Output ("hn-zellij-launch:{0}" -f $created.ProcessId)
+`;
+}
+
 function runZellij(worker, args, options = {}) {
   if (worker.platform === "windows") {
     const literals = args.map(quotePowerShell).join(", ");
@@ -117,28 +175,44 @@ function killSession(worker, sessionName) {
   runZellij(worker, ["kill-sessions", sessionName], { capture: true, allowFailure: true });
 }
 
+function windowsZellijLaunchLog(worker, sessionName) {
+  const safeSession = slug(sessionName).slice(0, 80) || "session";
+  const script = `
+$logFile = Join-Path (Join-Path $HOME '.hn\\logs') ${quotePowerShell(`zellij-create-${safeSession}.log`)}
+if (Test-Path $logFile) { Get-Content -Raw $logFile }
+`;
+  return runPowerShell(worker, script, { capture: true, allowFailure: true });
+}
+
 function createBackgroundSession(worker, sessionName) {
-  // Native Windows Zellij uses ConPTY and local IPC. Force a PTY for initial
-  // creation and pin ZELLIJ_SOCKET_DIR (via runZellij) so later SSH commands
-  // discover the same session instead of inheriting a different temp runtime.
-  const created = runZellij(
-    worker,
-    ["attach", "--create-background", sessionName],
-    {
-      capture: true,
-      allowFailure: true,
-      tty: worker.platform === "windows",
-    },
-  );
+  let created;
+  if (worker.platform === "windows") {
+    created = runPowerShell(
+      worker,
+      windowsDetachedZellijLaunchScript(sessionName),
+      { capture: true, allowFailure: true },
+    );
+  } else {
+    created = runZellij(
+      worker,
+      ["attach", "--create-background", sessionName],
+      { capture: true, allowFailure: true },
+    );
+  }
+
   if (created.code !== 0) {
     fail(`Zellij session '${sessionName}' could not be created (${diagnosticText(created)}).`);
   }
 
-  const inspection = inspectSession(worker, sessionName, { attempts: 30, delayMs: 100 });
+  const inspection = inspectSession(worker, sessionName, { attempts: 50, delayMs: 100 });
   if (!inspection.panes) {
     const listed = runZellij(worker, ["list-sessions"], { capture: true, allowFailure: true });
+    const launchLog = worker.platform === "windows" ? windowsZellijLaunchLog(worker, sessionName) : null;
+    const logText = launchLog && String(launchLog.stdout ?? "").trim()
+      ? `; launcher-log: ${String(launchLog.stdout).trim().slice(0, 1600)}`
+      : "";
     fail(
-      `Zellij session '${sessionName}' was created but could not be inspected (${diagnosticText(inspection.result)}; list-sessions: ${diagnosticText(listed)}).`,
+      `Zellij session '${sessionName}' was created but could not be inspected (${diagnosticText(inspection.result)}; list-sessions: ${diagnosticText(listed)}${logText}).`,
     );
   }
   return inspection.panes;
