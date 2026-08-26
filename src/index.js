@@ -75,8 +75,8 @@ function requireArgs(args, count, usage) {
   if (args.length < count) fail(`Usage: ${usage}`);
 }
 
-function targetFor(config, workspace = null) {
-  const name = resolveActiveTargetName(config, workspace);
+function targetFor(config) {
+  const name = resolveActiveTargetName(config);
   if (!name) fail("No compute target configured. Run: hn worker add pc user@host");
   return { name, worker: requireWorker(config, name) };
 }
@@ -98,7 +98,7 @@ function prepareTarget(config, name, { quiet = true } = {}) {
 
 function currentContext(config, workspaceName = undefined) {
   const context = findContext(config, process.cwd(), workspaceName);
-  const target = targetFor(config, context.workspace);
+  const target = targetFor(config);
   return { ...context, targetName: target.name, worker: target.worker };
 }
 
@@ -136,7 +136,7 @@ function printStatus(config, workspaceName = undefined) {
   const workspace = workspaceName
     ? requireWorkspace(config, workspaceName)
     : context?.workspace ?? null;
-  const targetName = resolveActiveTargetName(config, workspace);
+  const targetName = resolveActiveTargetName(config);
 
   if (!targetName) {
     console.log("target     —");
@@ -194,7 +194,7 @@ function addTarget(config, nameInput, targetInput) {
 }
 
 function syncWholeWorkspace(config, workspaceName, workspace) {
-  const target = targetFor(config, workspace);
+  const target = targetFor(config);
   const worker = prepareTarget(config, target.name);
   ensureRemoteDirectories(worker, workspace.roots.map((root) => root.remote));
   const sessions = workspace.roots.map((root) =>
@@ -303,9 +303,8 @@ async function main() {
   if (command === "workspace") {
     const [sub, ...rest] = args;
     if (sub === "create") {
-      requireArgs(rest, 1, "hn workspace create <name> [default-target]");
-      const defaultTarget = rest[1] ? normalizeName(rest[1], "target name") : null;
-      const name = createWorkspace(config, rest[0], defaultTarget);
+      requireArgs(rest, 1, "hn workspace create <name>");
+      const name = createWorkspace(config, rest[0]);
       console.log(`created ${name}`);
       return;
     }
@@ -317,7 +316,7 @@ async function main() {
     }
     if (sub === "list") {
       for (const [name, workspace] of Object.entries(config.workspaces)) {
-        console.log(`${name}${workspace.defaultWorker ? `  default:${workspace.defaultWorker}` : ""}`);
+        console.log(name);
         for (const root of workspace.roots ?? []) console.log(`  ${root.local} <-> ${root.remote}`);
       }
       return;
