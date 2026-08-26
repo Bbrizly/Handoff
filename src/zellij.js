@@ -48,19 +48,61 @@ export function paneMatchesCommand(pane, commandArgs, paneName) {
   return expected !== "" && normalizeExecutable(pane.pane_command) === expected;
 }
 
-function inspectSession(worker, sessionName) {
-  const result = runZellij(
-    worker,
-    ["--session", sessionName, "action", "list-panes", "--json"],
-    { capture: true, allowFailure: true },
-  );
-  if (result.code !== 0) return null;
+export function parsePaneListOutput(output) {
+  const text = String(output ?? "").trim();
+  if (!text) return null;
+
   try {
-    const panes = JSON.parse(result.stdout.trim());
-    return Array.isArray(panes) ? panes : null;
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : null;
   } catch {
-    return null;
+    // Be tolerant of harmless wrapper noise around otherwise-valid JSON.
+    const start = text.indexOf("[");
+    const end = text.lastIndexOf("]");
+    if (start < 0 || end < start) return null;
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
+}
+
+function sleepMs(ms) {
+  if (!ms) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function inspectSession(worker, sessionName, { attempts = 1, delayMs = 125 } = {}) {
+  let lastResult = { code: 1, stdout: "", stderr: "" };
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    lastResult = runZellij(
+      worker,
+      ["--session", sessionName, "action", "list-panes", "--json"],
+      { capture: true, allowFailure: true },
+    );
+
+    if (lastResult.code === 0) {
+      const panes = parsePaneListOutput(lastResult.stdout);
+      if (panes) return { panes, result: lastResult };
+    }
+
+    if (attempt < attempts - 1) sleepMs(delayMs);
+  }
+
+  return { panes: null, result: lastResult };
+}
+
+function diagnosticText(result) {
+  if (!result) return "no diagnostic output";
+  const pieces = [`exit ${result.code}`];
+  const stdout = String(result.stdout ?? "").trim();
+  const stderr = String(result.stderr ?? "").trim();
+  if (stdout) pieces.push(`stdout: ${stdout.slice(0, 1200)}`);
+  if (stderr) pieces.push(`stderr: ${stderr.slice(0, 1200)}`);
+  return pieces.join("; ");
 }
 
 function killSession(worker, sessionName) {
@@ -69,9 +111,11 @@ function killSession(worker, sessionName) {
 
 function createBackgroundSession(worker, sessionName) {
   runZellij(worker, ["attach", "--create-background", sessionName], { capture: true });
-  const panes = inspectSession(worker, sessionName);
-  if (!panes) fail(`Zellij session '${sessionName}' was created but could not be inspected.`);
-  return panes;
+  const inspection = inspectSession(worker, sessionName, { attempts: 20, delayMs: 100 });
+  if (!inspection.panes) {
+    fail(`Zellij session '${sessionName}' was created but could not be inspected (${diagnosticText(inspection.result)}).`);
+  }
+  return inspection.panes;
 }
 
 function posixCwdSetup(remoteCwd) {
@@ -145,7 +189,8 @@ z="$HOME/.hn/bin/zellij"
 
 export function ensurePersistentCommand(worker, sessionName, remoteCwd, commandArgs) {
   const paneName = `hn:${slug(commandArgs[0] ?? "shell").slice(0, 30)}`;
-  let panes = inspectSession(worker, sessionName);
+  let inspection = inspectSession(worker, sessionName, { attempts: 2, delayMs: 100 });
+  let panes = inspection.panes;
   if (panes?.some((pane) => paneMatchesCommand(pane, commandArgs, paneName))) return;
 
   if (panes) killSession(worker, sessionName);
@@ -154,9 +199,9 @@ export function ensurePersistentCommand(worker, sessionName, remoteCwd, commandA
   if (!initialPane) fail(`Zellij session '${sessionName}' has no terminal pane.`);
 
   startCommandPane(worker, sessionName, initialPane.id, remoteCwd, commandArgs, paneName);
-  const verified = inspectSession(worker, sessionName);
-  if (!verified?.some((pane) => paneMatchesCommand(pane, commandArgs, paneName))) {
-    fail(`Remote command '${commandArgs[0]}' did not start inside Zellij.`);
+  inspection = inspectSession(worker, sessionName, { attempts: 20, delayMs: 100 });
+  if (!inspection.panes?.some((pane) => paneMatchesCommand(pane, commandArgs, paneName))) {
+    fail(`Remote command '${commandArgs[0]}' did not start inside Zellij (${diagnosticText(inspection.result)}).`);
   }
 }
 
