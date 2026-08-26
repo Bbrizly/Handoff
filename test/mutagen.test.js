@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mutagenEndpoint, parseSyncStatusOutput, syncSessionName } from "../src/mutagen.js";
+import {
+  checksumForAsset,
+  mutagenEndpoint,
+  mutagenReleaseAsset,
+  parseSyncStatusOutput,
+  syncSessionName,
+} from "../src/mutagen.js";
 
 const root = { local: "/Users/me/GitHub", remote: "hn/main/GitHub" };
 
@@ -37,4 +43,30 @@ test("sync status tolerates empty conflict counts", () => {
     state: "scanning",
     conflicts: 0,
   });
+});
+
+test("managed Mutagen selects the official macOS ARM64 release asset", () => {
+  assert.equal(mutagenReleaseAsset("darwin", "arm64"), "mutagen_darwin_arm64_v0.18.1.tar.gz");
+});
+
+test("managed Mutagen selects the official Linux x64 release asset", () => {
+  assert.equal(mutagenReleaseAsset("linux", "x64"), "mutagen_linux_amd64_v0.18.1.tar.gz");
+});
+
+test("managed Mutagen rejects unsupported controller platforms", () => {
+  assert.equal(mutagenReleaseAsset("win32", "x64"), null);
+  assert.equal(mutagenReleaseAsset("darwin", "ia32"), null);
+});
+
+test("official SHA256SUMS parser finds exact release asset", () => {
+  const asset = "mutagen_darwin_arm64_v0.18.1.tar.gz";
+  const digest = "a".repeat(64);
+  const sums = `${"b".repeat(64)}  another-file.tar.gz\n${digest}  ${asset}\n`;
+  assert.equal(checksumForAsset(sums, asset), digest);
+});
+
+test("official SHA256SUMS parser accepts binary marker format", () => {
+  const asset = "mutagen_linux_amd64_v0.18.1.tar.gz";
+  const digest = "c".repeat(64);
+  assert.equal(checksumForAsset(`${digest} *${asset}\n`, asset), digest);
 });
