@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { paneMatchesCommand, sessionNameFor } from "../src/zellij.js";
+import { paneMatchesCommand, parsePaneListOutput, sessionNameFor } from "../src/zellij.js";
 
 const project = "/Users/me/GitHub/Palmier";
 
@@ -35,4 +35,18 @@ test("pane matching ignores exited processes", () => {
 
 test("pane matching tolerates missing pane_command", () => {
   assert.equal(paneMatchesCommand({ title: "shell", exited: false, is_plugin: false }, ["claude"], "hn:claude"), false);
+});
+
+test("pane JSON parser accepts clean Zellij output", () => {
+  const panes = [{ id: 0, is_plugin: false, title: "PowerShell", exited: false }];
+  assert.deepEqual(parsePaneListOutput(JSON.stringify(panes)), panes);
+});
+
+test("pane JSON parser tolerates harmless wrapper noise", () => {
+  const panes = [{ id: 0, is_plugin: false, title: "PowerShell", exited: false }];
+  assert.deepEqual(parsePaneListOutput(`notice\n${JSON.stringify(panes)}\n`), panes);
+});
+
+test("pane JSON parser rejects non-JSON output", () => {
+  assert.equal(parsePaneListOutput("session is still starting"), null);
 });
