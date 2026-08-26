@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mutagenEndpoint, syncSessionName } from "../src/mutagen.js";
+import { mutagenEndpoint, parseSyncStatusOutput, syncSessionName } from "../src/mutagen.js";
 
 const root = { local: "/Users/me/GitHub", remote: "hn/main/GitHub" };
 
@@ -20,4 +20,18 @@ test("sync session identity changes when target changes", () => {
   const pcName = syncSessionName("main", "pc", pc, root);
   const awsName = syncSessionName("main", "aws", aws, root);
   assert.notEqual(pcName, awsName);
+});
+
+test("sync status counts visible and excluded conflicts", () => {
+  assert.deepEqual(parseSyncStatusOutput("Watching for changes|2|3"), {
+    state: "watching for changes",
+    conflicts: 5,
+  });
+});
+
+test("sync status tolerates empty conflict counts", () => {
+  assert.deepEqual(parseSyncStatusOutput("Scanning||"), {
+    state: "scanning",
+    conflicts: 0,
+  });
 });
