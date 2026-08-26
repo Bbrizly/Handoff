@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { defaultRemoteRoot, normalizeLocalPath } from "./resolve.js";
+import { defaultRemoteRoot, isInside, normalizeLocalPath } from "./resolve.js";
 import { requireWorker, saveConfig } from "./config.js";
 import { fail, normalizeName } from "./util.js";
 
@@ -11,6 +11,12 @@ export function normalizeRemotePath(input) {
   const segments = value.split("/").filter(Boolean);
   if (segments.includes("..")) fail("Remote paths cannot contain '..'.");
   return value;
+}
+
+export function remotePathsOverlap(first, second) {
+  const a = normalizeRemotePath(first).toLowerCase();
+  const b = normalizeRemotePath(second).toLowerCase();
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
 export function addWorker(config, nameInput, worker) {
@@ -39,6 +45,18 @@ export function addWorkspaceRoot(config, workspaceNameInput, localInput, remoteI
 
   const remote = normalizeRemotePath(remoteInput || defaultRemoteRoot(workspaceName, local));
   const existing = workspace.roots.find((root) => normalizeLocalPath(root.local) === local);
+  const others = workspace.roots.filter((root) => root !== existing);
+
+  for (const root of others) {
+    const otherLocal = normalizeLocalPath(root.local);
+    if (isInside(otherLocal, local) || isInside(local, otherLocal)) {
+      fail(`Workspace roots cannot overlap: ${local} and ${otherLocal}`);
+    }
+    if (remotePathsOverlap(root.remote, remote)) {
+      fail(`Remote workspace roots cannot overlap: ${remote} and ${root.remote}`);
+    }
+  }
+
   if (existing) {
     existing.remote = remote;
   } else {
