@@ -4,6 +4,7 @@ import {
   paneMatchesCommand,
   parsePaneListOutput,
   sessionNameFor,
+  windowsDetachedZellijLaunchScript,
   windowsZellijRuntimeSetup,
 } from "../src/zellij.js";
 
@@ -61,4 +62,13 @@ test("Windows Zellij uses one stable Handoff-owned socket directory", () => {
   assert.match(setup, /ZELLIJ_SOCKET_DIR/);
   assert.match(setup, /\.hn\\zellij-sockets/);
   assert.match(setup, /New-Item -ItemType Directory -Force/);
+});
+
+test("Windows background Zellij creation escapes the OpenSSH process job", () => {
+  const script = windowsDetachedZellijLaunchScript("main-pc-handoff-claude-1234");
+  assert.match(script, /Win32_ProcessStartup/);
+  assert.match(script, /CreateFlags = \[uint32\]16777216/);
+  assert.match(script, /Invoke-CimMethod -ClassName Win32_Process -MethodName Create/);
+  assert.match(script, /EnvironmentVariables/);
+  assert.match(script, /Detached Zellij launcher ran as/);
 });
