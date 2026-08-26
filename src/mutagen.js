@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { shortHash, fail, quotePosix } from "./util.js";
 
 const MUTAGEN_VERSION = "0.18.1";
@@ -20,6 +20,11 @@ const MANAGED_MUTAGEN_BINARY = join(
   process.platform === "win32" ? "mutagen.exe" : "mutagen",
 );
 const MANAGED_MUTAGEN_AGENTS = join(MANAGED_MUTAGEN_DIR, "mutagen-agents.tar.gz");
+
+const SESSION_RECORD_TEMPLATE = `{{range .}}{{.Name}}|{{.Identifier}}|{{.CreationTime}}
+{{end}}`;
+const SYNC_STATUS_TEMPLATE = `{{range .}}{{.Status.Description}}|{{if .SessionState}}{{len .Conflicts}}|{{.ExcludedConflicts}}{{else}}0|0{{end}}
+{{end}}`;
 
 const DEFAULT_IGNORES = [
   "node_modules/",
@@ -178,13 +183,42 @@ function runMutagen(args, { capture = false, allowFailure = false, ensure = true
   return { code, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-function sessionNames(kind, { ensure = true } = {}) {
+export function parseSessionRecords(output) {
+  return String(output)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name = "", identifier = "", creationTime = ""] = line.split("|");
+      return { name, identifier, creationTime };
+    })
+    .filter((record) => record.identifier);
+}
+
+function sessionRecords(kind, { ensure = true } = {}) {
   const result = runMutagen(
-    [kind, "list", "--template", "{{range .}}{{.Name}}\\n{{end}}"],
+    [kind, "list", "--template", SESSION_RECORD_TEMPLATE],
     { capture: true, allowFailure: true, ensure },
   );
   if (result.code !== 0) return [];
-  return result.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  return parseSessionRecords(result.stdout);
+}
+
+function namedSessions(kind, name, options = {}) {
+  return sessionRecords(kind, options)
+    .filter((record) => record.name === name)
+    .sort((a, b) => String(a.creationTime).localeCompare(String(b.creationTime)));
+}
+
+function repairDuplicateNamedSessions(kind, name) {
+  const matches = namedSessions(kind, name);
+  if (!matches.length) return null;
+
+  const [keeper, ...duplicates] = matches;
+  for (const duplicate of duplicates) {
+    runMutagen([kind, "terminate", duplicate.identifier], { capture: true, allowFailure: true });
+  }
+  return keeper;
 }
 
 function endpointHost(worker) {
@@ -208,53 +242,83 @@ export function syncSessionName(workspaceName, targetName, worker, root) {
 
 export function ensureSyncRoot(workspaceName, targetName, worker, root) {
   const name = syncSessionName(workspaceName, targetName, worker, root);
-  if (sessionNames("sync").includes(name)) {
-    runMutagen(["sync", "resume", name], { capture: true, allowFailure: true });
-    return { name, created: false };
+  let session = repairDuplicateNamedSessions("sync", name);
+  if (session) {
+    runMutagen(["sync", "resume", session.identifier], { capture: true, allowFailure: true });
+    return { name, identifier: session.identifier, created: false };
   }
 
   const args = ["sync", "create", "--name", name, "--sync-mode", "two-way-safe", "--ignore-vcs"];
   for (const pattern of DEFAULT_IGNORES) args.push("--ignore", pattern);
   args.push(root.local, mutagenEndpoint(worker, root.remote));
-  runMutagen(args);
-  return { name, created: true };
+  runMutagen(args, { capture: true });
+
+  session = repairDuplicateNamedSessions("sync", name);
+  if (!session) fail(`Mutagen created sync '${name}' but hn could not find it afterwards.`);
+  return { name, identifier: session.identifier, created: true };
 }
 
 export function parseSyncStatusOutput(output) {
-  const [description = "unknown", visibleText = "0", excludedText = "0"] = String(output).trim().split("|");
-  const visible = Number.parseInt(visibleText, 10) || 0;
-  const excluded = Number.parseInt(excludedText, 10) || 0;
-  return {
-    state: description.trim().toLowerCase() || "unknown",
-    conflicts: visible + excluded,
-  };
+  const lines = String(output).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return { state: "not-started", conflicts: 0 };
+
+  let conflicts = 0;
+  let state = "unknown";
+  for (const line of lines) {
+    const [description = "unknown", visibleText = "0", excludedText = "0"] = line.split("|");
+    state = description.trim().toLowerCase() || state;
+    conflicts += (Number.parseInt(visibleText, 10) || 0) + (Number.parseInt(excludedText, 10) || 0);
+  }
+  return { state, conflicts };
 }
 
-export function getSyncStatus(name) {
+export function getSyncStatus(session) {
   if (!isMutagenInstalled()) return { state: "mutagen-missing", conflicts: 0 };
-  if (!sessionNames("sync", { ensure: false }).includes(name)) {
-    return { state: "not-started", conflicts: 0 };
-  }
-
-  const template = "{{range .}}{{.Status.Description}}|{{if .SessionState}}{{len .Conflicts}}|{{.ExcludedConflicts}}{{else}}0|0{{end}}{{end}}";
   const result = runMutagen(
-    ["sync", "list", name, "--template", template],
+    ["sync", "list", session, "--template", SYNC_STATUS_TEMPLATE],
     { capture: true, allowFailure: true, ensure: false },
   );
-  if (result.code !== 0) return { state: "error", conflicts: 0 };
+  if (result.code !== 0) return { state: "not-started", conflicts: 0 };
   return parseSyncStatusOutput(result.stdout);
 }
 
-export function flushSyncSessions(names) {
-  const sessions = [...new Set(names.filter(Boolean))];
-  if (!sessions.length) return;
+function startSyncMonitor(session) {
+  if (!process.stdout.isTTY) return null;
+  const command = mutagenCommand();
+  if (!command) return null;
+  try {
+    return spawn(command, ["sync", "monitor", session], {
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+  } catch {
+    return null;
+  }
+}
 
-  runMutagen(["sync", "flush", ...sessions], { capture: true });
+function stopSyncMonitor(monitor) {
+  if (!monitor) return;
+  try {
+    monitor.kill("SIGTERM");
+  } catch {
+    // Best-effort UI helper only.
+  }
+}
 
-  for (const name of sessions) {
-    const status = getSyncStatus(name);
+export function flushSyncSessions(sessions) {
+  const requested = [...new Set(sessions.filter(Boolean))];
+  if (!requested.length) return;
+
+  const monitor = requested.length === 1 ? startSyncMonitor(requested[0]) : null;
+  try {
+    runMutagen(["sync", "flush", ...requested], { capture: true });
+  } finally {
+    stopSyncMonitor(monitor);
+  }
+
+  for (const session of requested) {
+    const status = getSyncStatus(session);
     if (status.conflicts > 0) {
-      fail(`Mutagen sync '${name}' has ${status.conflicts} conflict${status.conflicts === 1 ? "" : "s"}. Run 'hn status' before starting remote work.`);
+      fail(`Mutagen sync '${session}' has ${status.conflicts} conflict${status.conflicts === 1 ? "" : "s"}. Run 'hn status' before starting remote work.`);
     }
     if (
       ["error", "mutagen-missing", "not-started"].includes(status.state)
@@ -262,28 +326,30 @@ export function flushSyncSessions(names) {
       || status.state.includes("halted")
       || status.state.includes("waiting for rescan")
     ) {
-      fail(`Mutagen sync '${name}' is not healthy (${status.state}). Run 'hn status' for details.`);
+      fail(`Mutagen sync '${session}' is not healthy (${status.state}). Run 'hn status' for details.`);
     }
   }
 }
 
-export function showSyncStatus(name) {
+export function showSyncStatus(session) {
   if (!isMutagenInstalled()) {
     console.log("  Mutagen not installed");
     return;
   }
-  if (!sessionNames("sync", { ensure: false }).includes(name)) {
+  const result = runMutagen(["sync", "list", session], { capture: true, allowFailure: true, ensure: false });
+  if (result.code !== 0 || !result.stdout.trim()) {
     console.log("  not started");
     return;
   }
-  runMutagen(["sync", "list", name], { ensure: false });
+  process.stdout.write(result.stdout);
 }
 
 export function ensureForward(worker, key, remotePort, localPort = remotePort) {
   const name = `hn-port-${shortHash(`${workerIdentity(worker)}:${key}:${remotePort}:${localPort}`)}`;
-  if (sessionNames("forward").includes(name)) {
-    runMutagen(["forward", "resume", name], { capture: true, allowFailure: true });
-    return name;
+  let session = repairDuplicateNamedSessions("forward", name);
+  if (session) {
+    runMutagen(["forward", "resume", session.identifier], { capture: true, allowFailure: true });
+    return session.identifier;
   }
 
   runMutagen([
@@ -291,6 +357,9 @@ export function ensureForward(worker, key, remotePort, localPort = remotePort) {
     "--name", name,
     `tcp:127.0.0.1:${localPort}`,
     mutagenEndpoint(worker, `tcp:127.0.0.1:${remotePort}`),
-  ]);
-  return name;
+  ], { capture: true });
+
+  session = repairDuplicateNamedSessions("forward", name);
+  if (!session) fail(`Mutagen created forwarding session '${name}' but hn could not find it afterwards.`);
+  return session.identifier;
 }
