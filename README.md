@@ -13,7 +13,7 @@ localhost       <------------------- dev servers
 
 ## Setup
 
-The controller needs Node 20+, SSH/SCP, and Homebrew on macOS. `hn` installs Mutagen with Homebrew on first use if needed.
+The controller needs Node 20+ and SSH/SCP. On first sync, `hn` downloads the pinned official Mutagen v0.18.1 release directly from GitHub, verifies it against the release's SHA256SUMS, and keeps the binary plus its agent bundle under `~/.hn/bin`. Homebrew is not required for Mutagen.
 
 A worker needs the tools you actually want to run there (Claude, Codex, Node, Python, etc.). `hn` manages SSH pairing and injects a pinned, checksum-verified Zellij binary. Windows does not need WSL or a manual Zellij install.
 
