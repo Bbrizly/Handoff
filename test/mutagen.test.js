@@ -4,6 +4,7 @@ import {
   checksumForAsset,
   mutagenEndpoint,
   mutagenReleaseAsset,
+  parseSessionRecords,
   parseSyncStatusOutput,
   syncSessionName,
 } from "../src/mutagen.js";
@@ -31,6 +32,25 @@ test("sync session identity changes when target changes", () => {
   assert.notEqual(pcName, awsName);
 });
 
+test("session records parse one real line per Mutagen session", () => {
+  const output = [
+    "hn-sync-a|sync_first|2026-08-26T20:00:00Z",
+    "hn-sync-a|sync_second|2026-08-26T20:05:00Z",
+    "hn-sync-b|sync_third|2026-08-26T20:06:00Z",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseSessionRecords(output), [
+    { name: "hn-sync-a", identifier: "sync_first", creationTime: "2026-08-26T20:00:00Z" },
+    { name: "hn-sync-a", identifier: "sync_second", creationTime: "2026-08-26T20:05:00Z" },
+    { name: "hn-sync-b", identifier: "sync_third", creationTime: "2026-08-26T20:06:00Z" },
+  ]);
+});
+
+test("session parser rejects the old literal-backslash newline failure mode", () => {
+  const records = parseSessionRecords("hn-sync-a\\nhn-sync-b\\n");
+  assert.equal(records.length, 0);
+});
+
 test("sync status counts visible and excluded conflicts", () => {
   assert.deepEqual(parseSyncStatusOutput("Watching for changes|2|3"), {
     state: "watching for changes",
@@ -41,6 +61,13 @@ test("sync status counts visible and excluded conflicts", () => {
 test("sync status tolerates empty conflict counts", () => {
   assert.deepEqual(parseSyncStatusOutput("Scanning||"), {
     state: "scanning",
+    conflicts: 0,
+  });
+});
+
+test("empty sync status means session is not started", () => {
+  assert.deepEqual(parseSyncStatusOutput(""), {
+    state: "not-started",
     conflicts: 0,
   });
 });
