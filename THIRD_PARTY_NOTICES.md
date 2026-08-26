@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Handoff is an independent implementation.
+`hn` is an independent implementation.
 
 ## EnvHaven
 
@@ -8,10 +8,10 @@ EnvHaven (`envhaven/envhaven`) was studied as an architectural reference for the
 
 ## Mutagen
 
-Handoff invokes a separately installed Mutagen executable for synchronization and forwarding. Mutagen is not vendored or redistributed by this repository. Mutagen's licensing differs by build; review the Mutagen license before bundling it in a distributed product.
+`hn` invokes a separately installed Mutagen executable for synchronization and forwarding. Mutagen is not vendored or redistributed by this repository. Mutagen licensing differs by build; review the upstream license before bundling Mutagen in a distributed product.
 
 ## Zellij
 
-Handoff can bootstrap the official Zellij Windows binary from the upstream Zellij GitHub release. Zellij is MIT licensed. Handoff does not commit or vendor the Zellij binary in this repository.
+`hn` downloads the official Zellij release archive on the controller, verifies its SHA-256, extracts it locally, and copies the Zellij binary to the worker. Zellij is MIT licensed. The repository does not vendor or commit Zellij binaries.
 
-The prototype currently pins Zellij v0.45.0 for reproducibility.
+The current prototype pins Zellij v0.45.0 for reproducibility.

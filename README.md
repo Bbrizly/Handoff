@@ -1,86 +1,103 @@
-# Handoff
+# hn
 
-Local-first remote execution: edit locally, execute remotely.
+Local files. Compute anywhere.
 
 ```text
-Mac                                Windows worker
----                                --------------
-Zed + local files                  Tailscale
-local .git                    SSH  OpenSSH
-Handoff CLI  --------------------> Zellij
-Mutagen      <-------------------> Claude / Codex / builds
-localhost    <-------------------- dev servers
+Mac                                  pc / home / aws
+---                                  ---------------
+Zed + local files                    SSH reachable
+local .git                      SSH  Zellij
+hn + Mutagen  ---------------------> Claude / Codex / builds
+localhost       <------------------- dev servers
 ```
 
-## Prototype setup
+## Setup
 
-Requirements on the Mac: Node 20+, SSH, and Homebrew. The CLI installs Mutagen through Homebrew on first use if Mutagen is missing.
+The controller needs Node 20+, SSH/SCP, and Homebrew on macOS. `hn` installs Mutagen with Homebrew on first use if needed.
 
-The Windows machine only needs Tailscale and a working OpenSSH server to start. Handoff bootstraps its own pinned Zellij binary into the remote user's home directory automatically.
+A worker needs SSH access plus the tools you actually want to run there (Claude, Codex, Node, Python, etc.). `hn` downloads a pinned Zellij build on the controller, verifies its SHA-256, and injects the binary over SCP. No WSL or manual Zellij install is required.
 
 ```bash
+git clone https://github.com/Bbrizly/Handoff.git
+cd Handoff
 npm link
 
-handoff worker add lenovo YOUR_WINDOWS_USER@YOUR_TAILSCALE_IP
-handoff workspace create main lenovo
-handoff workspace add main ~/GitHub
-
-cd ~/GitHub/your-project
-handoff claude
+hn worker add pc YOUR_WINDOWS_USER@YOUR_TAILSCALE_IP
+hn workspace add main ~/GitHub
+hn workspace add main ~/Obsidian
+hn workspace add main ~/Downloads
 ```
 
-The first remote command will:
-
-1. verify SSH,
-2. install Handoff's private Zellij binary on Windows if needed,
-3. create/resume a Mutagen two-way-safe sync with VCS metadata excluded,
-4. create or reattach a persistent Zellij session,
-5. run the command from the matching remote path.
-
-Any unrecognized Handoff command is treated as a persistent remote command, so these work from inside a configured root:
+Target names are just aliases. Add any SSH-reachable machine:
 
 ```bash
-handoff claude
-handoff codex
-handoff npm run dev
-handoff npm test
+hn worker add home user@home-machine
+hn worker add aws ubuntu@server.example.com
 ```
 
-For a one-shot command:
+Tailscale is optional; LAN, VPN, or any other working SSH route is fine.
+
+## Daily use
 
 ```bash
-handoff exec npm test
+hn          # status
+hn pc       # use pc
+hn home     # use home
+hn aws      # use aws
 ```
 
-Forward a remote dev server to the same local port:
+From a local project:
 
 ```bash
-handoff port 5173
+cd ~/GitHub/Palmier
+hn claude
+hn codex
+hn npm run dev
 ```
 
-Or map ports explicitly:
+`hn` synchronizes every root in the workspace. Claude and Codex automatically receive the other workspace roots through `--add-dir`.
+
+A normal command reattaches its persistent project session. Start another independent session with:
 
 ```bash
-handoff port 3000 3001
+hn new claude
+```
+
+Other useful commands:
+
+```bash
+hn shell
+hn exec npm test
+hn sessions
+hn attach <session>
+hn port 5173
+hn doctor
+hn sync
+```
+
+You can select and run in one command:
+
+```bash
+hn aws claude
 ```
 
 ## Git model
 
-`.git` is intentionally **not synchronized**. Git remains authoritative on the local machine. Remote tools edit the synchronized working tree; those edits appear locally as ordinary Git changes.
+`.git` never synchronizes. Your local checkout is the authoritative Git repository. Remote tools edit the synchronized working tree; those edits appear locally as ordinary Git changes.
 
-## Current scope
+## Worker support
 
-- macOS controller
-- native Windows worker over SSH
-- multi-root workspaces
-- Mutagen two-way-safe synchronization
-- `.git` excluded
-- persistent Zellij sessions
-- arbitrary remote commands
-- manual localhost forwarding
+- native Windows over OpenSSH / PowerShell
+- Linux over SSH
+- macOS over SSH
+- x64 and arm64 where an official Zellij build exists
 
-Automatic port discovery, menu-bar UI, arbitrary outside-file sharing, native macOS/Linux worker adapters, and a packaged installer are later milestones.
+Windows does **not** require WSL.
+
+## Current caveat
+
+Mutagen documents historical performance/stalling issues with Microsoft's Windows OpenSSH server. The architecture avoids extra Windows setup, but real performance still depends on the actual Windows SSH endpoint. `hn doctor` checks connectivity and required worker tools.
 
 ## Third-party software
 
-Handoff does not vendor Mutagen or Zellij in this repository. See `THIRD_PARTY_NOTICES.md` for details.
+See `THIRD_PARTY_NOTICES.md`.

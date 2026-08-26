@@ -3,29 +3,74 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fail } from "./util.js";
 
-const CONFIG_PATH = join(homedir(), ".handoff", "config.json");
+const CONFIG_PATH = join(homedir(), ".hn", "config.json");
+const LEGACY_CONFIG_PATH = join(homedir(), ".handoff", "config.json");
+
+function objectOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+export function normalizeConfig(input = {}) {
+  const raw = objectOrEmpty(input);
+  const workers = { ...objectOrEmpty(raw.workers) };
+  const workspaces = {};
+
+  for (const [name, workspaceInput] of Object.entries(objectOrEmpty(raw.workspaces))) {
+    const workspace = objectOrEmpty(workspaceInput);
+    const roots = Array.isArray(workspace.roots)
+      ? workspace.roots.map((root) => ({
+          ...root,
+          remote: typeof root?.remote === "string"
+            ? root.remote.replace(/^handoff\//, "hn/")
+            : root?.remote,
+        }))
+      : [];
+    const defaultWorker = workspace.defaultWorker ?? workspace.worker ?? null;
+    workspaces[name] = defaultWorker ? { defaultWorker, roots } : { roots };
+  }
+
+  const workspaceDefault = Object.values(workspaces)
+    .map((workspace) => workspace.defaultWorker)
+    .find((name) => name && workers[name]);
+  const requestedActive = raw.activeTarget ?? raw.activeWorker ?? workspaceDefault ?? null;
+  const activeTarget = requestedActive && workers[requestedActive]
+    ? requestedActive
+    : (Object.keys(workers)[0] ?? null);
+
+  return {
+    version: 2,
+    activeTarget,
+    workers,
+    workspaces,
+  };
+}
+
+function readConfig(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    fail(`Could not read ${path}: ${error.message}`);
+  }
+}
 
 export function loadConfig() {
-  if (!existsSync(CONFIG_PATH)) return { workers: {}, workspaces: {} };
-  try {
-    const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-    return {
-      workers: parsed.workers ?? {},
-      workspaces: parsed.workspaces ?? {},
-    };
-  } catch (error) {
-    fail(`Could not read ${CONFIG_PATH}: ${error.message}`);
+  if (existsSync(CONFIG_PATH)) return normalizeConfig(readConfig(CONFIG_PATH));
+  if (existsSync(LEGACY_CONFIG_PATH)) {
+    const migrated = normalizeConfig(readConfig(LEGACY_CONFIG_PATH));
+    saveConfig(migrated);
+    return migrated;
   }
+  return normalizeConfig();
 }
 
 export function saveConfig(config) {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  writeFileSync(CONFIG_PATH, JSON.stringify(normalizeConfig(config), null, 2) + "\n", { mode: 0o600 });
 }
 
 export function requireWorker(config, name) {
   const worker = config.workers[name];
-  if (!worker) fail(`Unknown worker '${name}'.`);
+  if (!worker) fail(`Unknown target '${name}'. Add it with: hn worker add ${name} user@host`);
   return worker;
 }
 
@@ -33,6 +78,18 @@ export function requireWorkspace(config, name) {
   const workspace = config.workspaces[name];
   if (!workspace) fail(`Unknown workspace '${name}'.`);
   return workspace;
+}
+
+export function resolveActiveTargetName(config, workspace = null) {
+  if (config.activeTarget && config.workers[config.activeTarget]) return config.activeTarget;
+  if (workspace?.defaultWorker && config.workers[workspace.defaultWorker]) return workspace.defaultWorker;
+  return Object.keys(config.workers)[0] ?? null;
+}
+
+export function setActiveTarget(config, name) {
+  requireWorker(config, name);
+  config.activeTarget = name;
+  saveConfig(config);
 }
 
 export function configPath() {
