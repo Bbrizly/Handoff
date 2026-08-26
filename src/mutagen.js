@@ -65,8 +65,10 @@ function sessionNames(kind, { ensure = true } = {}) {
 }
 
 function endpointHost(worker) {
-  const host = worker.host.includes(":") ? `[${worker.host}]` : worker.host;
-  return `${worker.user ? `${worker.user}@` : ""}${host}${worker.port && worker.port !== 22 ? `:${worker.port}` : ""}`;
+  if (String(worker.host).includes(":")) {
+    fail("Mutagen's SSH endpoint syntax cannot encode a literal IPv6 address. Use an SSH hostname/alias (for example Tailscale MagicDNS or ~/.ssh/config) for this target.");
+  }
+  return `${worker.user ? `${worker.user}@` : ""}${worker.host}${worker.port && worker.port !== 22 ? `:${worker.port}` : ""}`;
 }
 
 export function mutagenEndpoint(worker, remotePath) {
