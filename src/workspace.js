@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { defaultRemoteRoot, normalizeLocalPath } from "./resolve.js";
-import { requireWorker, saveConfig } from "./config.js";
+import { defaultRemoteRoot, isInside, normalizeLocalPath } from "./resolve.js";
+import { saveConfig } from "./config.js";
 import { fail, normalizeName } from "./util.js";
 
 export function normalizeRemotePath(input) {
@@ -13,19 +13,46 @@ export function normalizeRemotePath(input) {
   return value;
 }
 
-export function addWorker(config, nameInput, worker) {
+export function remotePathsOverlap(first, second) {
+  const a = normalizeRemotePath(first).toLowerCase();
+  const b = normalizeRemotePath(second).toLowerCase();
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+export function workerEndpointsEqual(first, second) {
+  if (!first || !second) return false;
+  return (first.user ?? "") === (second.user ?? "")
+    && String(first.host ?? "").toLowerCase() === String(second.host ?? "").toLowerCase()
+    && (first.port ?? 22) === (second.port ?? 22);
+}
+
+export function validateWorkerAssignment(config, nameInput, worker) {
   const name = normalizeName(nameInput, "target name");
+  const existing = config.workers[name];
+  if (existing && !workerEndpointsEqual(existing, worker)) {
+    fail(`Target '${name}' already points to ${existing.target ?? existing.host}. Use a different target name instead of replacing a live target.`);
+  }
+
+  for (const [otherName, other] of Object.entries(config.workers)) {
+    if (otherName !== name && workerEndpointsEqual(other, worker)) {
+      fail(`Target '${otherName}' already points to this SSH endpoint. One machine should have one target name.`);
+    }
+  }
+  return name;
+}
+
+export function addWorker(config, nameInput, worker) {
+  const name = validateWorkerAssignment(config, nameInput, worker);
   config.workers[name] = worker;
   if (!config.activeTarget) config.activeTarget = name;
   saveConfig(config);
   return name;
 }
 
-export function createWorkspace(config, nameInput, defaultWorker = null) {
+export function createWorkspace(config, nameInput) {
   const name = normalizeName(nameInput, "workspace name");
   if (config.workspaces[name]) fail(`Workspace '${name}' already exists.`);
-  if (defaultWorker) requireWorker(config, defaultWorker);
-  config.workspaces[name] = defaultWorker ? { defaultWorker, roots: [] } : { roots: [] };
+  config.workspaces[name] = { roots: [] };
   saveConfig(config);
   return name;
 }
@@ -39,6 +66,20 @@ export function addWorkspaceRoot(config, workspaceNameInput, localInput, remoteI
 
   const remote = normalizeRemotePath(remoteInput || defaultRemoteRoot(workspaceName, local));
   const existing = workspace.roots.find((root) => normalizeLocalPath(root.local) === local);
+
+  for (const [otherWorkspaceName, otherWorkspace] of Object.entries(config.workspaces)) {
+    for (const root of otherWorkspace.roots ?? []) {
+      if (otherWorkspaceName === workspaceName && root === existing) continue;
+      const otherLocal = normalizeLocalPath(root.local);
+      if (isInside(otherLocal, local) || isInside(local, otherLocal)) {
+        fail(`Workspace roots cannot overlap: ${local} and ${otherLocal}`);
+      }
+      if (remotePathsOverlap(root.remote, remote)) {
+        fail(`Remote workspace roots cannot overlap: ${remote} and ${root.remote}`);
+      }
+    }
+  }
+
   if (existing) {
     existing.remote = remote;
   } else {

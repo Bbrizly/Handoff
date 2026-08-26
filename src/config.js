@@ -14,6 +14,7 @@ export function normalizeConfig(input = {}) {
   const raw = objectOrEmpty(input);
   const workers = { ...objectOrEmpty(raw.workers) };
   const workspaces = {};
+  const legacyWorkspaceTargets = [];
 
   for (const [name, workspaceInput] of Object.entries(objectOrEmpty(raw.workspaces))) {
     const workspace = objectOrEmpty(workspaceInput);
@@ -25,14 +26,13 @@ export function normalizeConfig(input = {}) {
             : root?.remote,
         }))
       : [];
-    const defaultWorker = workspace.defaultWorker ?? workspace.worker ?? null;
-    workspaces[name] = defaultWorker ? { defaultWorker, roots } : { roots };
+    const legacyTarget = workspace.defaultWorker ?? workspace.worker ?? null;
+    if (legacyTarget) legacyWorkspaceTargets.push(legacyTarget);
+    workspaces[name] = { roots };
   }
 
-  const workspaceDefault = Object.values(workspaces)
-    .map((workspace) => workspace.defaultWorker)
-    .find((name) => name && workers[name]);
-  const requestedActive = raw.activeTarget ?? raw.activeWorker ?? workspaceDefault ?? null;
+  const migratedTarget = legacyWorkspaceTargets.find((name) => workers[name]) ?? null;
+  const requestedActive = raw.activeTarget ?? raw.activeWorker ?? migratedTarget ?? null;
   const activeTarget = requestedActive && workers[requestedActive]
     ? requestedActive
     : (Object.keys(workers)[0] ?? null);
@@ -80,9 +80,8 @@ export function requireWorkspace(config, name) {
   return workspace;
 }
 
-export function resolveActiveTargetName(config, workspace = null) {
+export function resolveActiveTargetName(config) {
   if (config.activeTarget && config.workers[config.activeTarget]) return config.activeTarget;
-  if (workspace?.defaultWorker && config.workers[workspace.defaultWorker]) return workspace.defaultWorker;
   return Object.keys(config.workers)[0] ?? null;
 }
 

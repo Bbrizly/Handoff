@@ -16,9 +16,9 @@ import { bootstrapWorker, detectWorker, doctorWorker, ensureRemoteDirectories } 
 import {
   ensureForward,
   ensureSyncRoot,
+  flushSyncSessions,
   getSyncStatus,
   isMutagenInstalled,
-  showSyncStatus,
   syncSessionName,
 } from "./mutagen.js";
 import { findContext, mapLocalToRemote, tryFindContext } from "./resolve.js";
@@ -75,8 +75,8 @@ function requireArgs(args, count, usage) {
   if (args.length < count) fail(`Usage: ${usage}`);
 }
 
-function targetFor(config, workspace = null) {
-  const name = resolveActiveTargetName(config, workspace);
+function targetFor(config) {
+  const name = resolveActiveTargetName(config);
   if (!name) fail("No compute target configured. Run: hn worker add pc user@host");
   return { name, worker: requireWorker(config, name) };
 }
@@ -98,7 +98,7 @@ function prepareTarget(config, name, { quiet = true } = {}) {
 
 function currentContext(config, workspaceName = undefined) {
   const context = findContext(config, process.cwd(), workspaceName);
-  const target = targetFor(config, context.workspace);
+  const target = targetFor(config);
   return { ...context, targetName: target.name, worker: target.worker };
 }
 
@@ -111,9 +111,13 @@ function workspaceSalt(workspace) {
 
 function ensureWorkspaceSync(context) {
   ensureRemoteDirectories(context.worker, context.workspace.roots.map((root) => root.remote));
-  for (const root of context.workspace.roots) {
-    ensureSyncRoot(context.name, context.targetName, context.worker, root);
+  const sessions = context.workspace.roots.map((root) =>
+    ensureSyncRoot(context.name, context.targetName, context.worker, root),
+  );
+  if (sessions.some((session) => session.created)) {
+    console.log(`syncing ${context.name} -> ${context.targetName}...`);
   }
+  flushSyncSessions(sessions.map((session) => session.name));
 }
 
 function syncStatusText(status) {
@@ -121,18 +125,18 @@ function syncStatusText(status) {
   if (status.state === "mutagen-missing" || status.state === "not-started") return "—";
   if (status.state.includes("watching")) return "✓";
   if (["scanning", "staging", "reconciling", "saving"].some((value) => status.state.includes(value))) return "…";
-  if (status.state.includes("disconnected") || status.state === "error") return "✗";
+  if (status.state.includes("disconnected") || status.state.includes("halted") || status.state === "error") return "✗";
   return status.state || "?";
 }
 
 function printStatus(config, workspaceName = undefined) {
-  let context = workspaceName
+  const context = workspaceName
     ? tryFindContext(config, process.cwd(), workspaceName)
     : tryFindContext(config, process.cwd());
   const workspace = workspaceName
     ? requireWorkspace(config, workspaceName)
     : context?.workspace ?? null;
-  const targetName = resolveActiveTargetName(config, workspace);
+  const targetName = resolveActiveTargetName(config);
 
   if (!targetName) {
     console.log("target     —");
@@ -169,14 +173,12 @@ function printWorkerChecks(name, checks) {
   console.log(`  ${isMutagenInstalled() ? "✓" : "✗"} mutagen (controller)`);
 }
 
-function activateTarget(config, nameInput, { quiet = false } = {}) {
+function selectTarget(config, nameInput, { quiet = false } = {}) {
   const name = normalizeName(nameInput, "target name");
-  let worker = requireWorker(config, name);
-  worker = bootstrapWorker(worker, { quiet: true });
-  config.workers[name] = worker;
-  setActiveTarget(config, name);
-  if (!quiet) console.log(`${name} ✓  ${worker.platform}/${worker.arch}`);
-  return worker;
+  requireWorker(config, name);
+  if (config.activeTarget !== name) setActiveTarget(config, name);
+  if (!quiet) console.log(name);
+  return name;
 }
 
 function addTarget(config, nameInput, targetInput) {
@@ -188,23 +190,24 @@ function addTarget(config, nameInput, targetInput) {
   const worker = { ...base, ...detectWorker(base) };
   const prepared = bootstrapWorker(worker, { quiet: true });
   addWorker(config, name, prepared);
-  config.activeTarget = name;
-  saveConfig(config);
   console.log(`${name} ✓  ${prepared.platform}/${prepared.arch}  ${prepared.target}${prepared.port !== 22 ? `:${prepared.port}` : ""}`);
 }
 
 function syncWholeWorkspace(config, workspaceName, workspace) {
-  const target = targetFor(config, workspace);
+  const target = targetFor(config);
   const worker = prepareTarget(config, target.name);
   ensureRemoteDirectories(worker, workspace.roots.map((root) => root.remote));
-  for (const root of workspace.roots) {
-    ensureSyncRoot(workspaceName, target.name, worker, root);
-  }
+  const sessions = workspace.roots.map((root) =>
+    ensureSyncRoot(workspaceName, target.name, worker, root),
+  );
+  console.log(`syncing ${workspaceName} -> ${target.name}...`);
+  flushSyncSessions(sessions.map((session) => session.name));
+  console.log("sync ✓");
 }
 
-function runPersistent(config, commandArgs, { unique = false } = {}) {
+function runPersistent(config, commandArgs, { unique = false, preparedWorker = null } = {}) {
   let context = currentContext(config);
-  const worker = prepareTarget(config, context.targetName);
+  const worker = preparedWorker ?? prepareTarget(config, context.targetName);
   context = { ...context, worker };
   ensureWorkspaceSync(context);
 
@@ -212,6 +215,7 @@ function runPersistent(config, commandArgs, { unique = false } = {}) {
   const remoteArgs = augmentAgentCommand(commandArgs, context.workspace, remoteCwd);
   const sessionName = sessionNameFor(
     context.name,
+    context.targetName,
     context.projectLocal,
     commandArgs,
     workspaceSalt(context.workspace),
@@ -222,7 +226,7 @@ function runPersistent(config, commandArgs, { unique = false } = {}) {
 }
 
 async function main() {
-  let argv = process.argv.slice(2);
+  const argv = process.argv.slice(2);
   if (["help", "--help", "-h"].includes(argv[0])) {
     help();
     return;
@@ -237,10 +241,10 @@ async function main() {
   let [command, ...args] = argv;
   const possibleTarget = String(command).toLowerCase();
   if (!RESERVED_COMMANDS.has(possibleTarget) && config.workers[possibleTarget]) {
-    activateTarget(config, possibleTarget);
+    selectTarget(config, possibleTarget, { quiet: args.length > 0 });
     if (!args.length) return;
     [command, ...args] = args;
-  } else if (!args.length && TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
+  } else if (TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
     fail(`Target '${possibleTarget}' is not configured. Run: hn worker add ${possibleTarget} user@host`);
   }
 
@@ -299,9 +303,8 @@ async function main() {
   if (command === "workspace") {
     const [sub, ...rest] = args;
     if (sub === "create") {
-      requireArgs(rest, 1, "hn workspace create <name> [default-target]");
-      const defaultTarget = rest[1] ? normalizeName(rest[1], "target name") : null;
-      const name = createWorkspace(config, rest[0], defaultTarget);
+      requireArgs(rest, 1, "hn workspace create <name>");
+      const name = createWorkspace(config, rest[0]);
       console.log(`created ${name}`);
       return;
     }
@@ -313,7 +316,7 @@ async function main() {
     }
     if (sub === "list") {
       for (const [name, workspace] of Object.entries(config.workspaces)) {
-        console.log(`${name}${workspace.defaultWorker ? `  default:${workspace.defaultWorker}` : ""}`);
+        console.log(name);
         for (const root of workspace.roots ?? []) console.log(`  ${root.local} <-> ${root.remote}`);
       }
       return;
@@ -375,8 +378,12 @@ async function main() {
 
   if (command === "shell") {
     const context = currentContext(config);
-    const worker = prepareTarget(config, context.targetName);
-    runPersistent(config, shellCommand(worker));
+    if (context.worker.platform) {
+      runPersistent(config, shellCommand(context.worker));
+    } else {
+      const worker = prepareTarget(config, context.targetName);
+      runPersistent(config, shellCommand(worker), { preparedWorker: worker });
+    }
     return;
   }
 

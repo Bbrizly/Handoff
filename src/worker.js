@@ -12,7 +12,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { copyToWorker, runPosix, runPowerShell, runSsh, testSsh } from "./ssh.js";
+import { copyToWorker, runPosix, runPowerShell, testSsh } from "./ssh.js";
 import { fail, quotePosix, quotePowerShell } from "./util.js";
 
 export const ZELLIJ_VERSION = "0.45.0";
@@ -240,7 +240,8 @@ export function doctorWorker(worker) {
   const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
   checks.platform = metadata.platform;
   checks.arch = metadata.arch;
-  checks.zellij = zellijVersion(metadata).code === 0;
+  const zellij = zellijVersion(metadata);
+  checks.zellij = zellij.code === 0 && zellij.stdout.includes(ZELLIJ_VERSION);
 
   if (metadata.platform === "windows") {
     const script = `

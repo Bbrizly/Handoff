@@ -24,10 +24,10 @@ exit $LASTEXITCODE
   return runPosix(worker, `z="$HOME/.hn/bin/zellij"; "$z" ${command}`, options);
 }
 
-export function sessionNameFor(workspaceName, projectLocal, commandArgs, workspaceSalt = "", uniqueToken = "") {
+export function sessionNameFor(workspaceName, targetName, projectLocal, commandArgs, workspaceSalt = "", uniqueToken = "") {
   const command = commandArgs[0] ?? "shell";
-  const label = `${workspaceName}-${basename(projectLocal)}-${command}`;
-  const hash = shortHash(`${projectLocal}\u0000${commandArgs.join("\u0000")}\u0000${workspaceSalt}`);
+  const label = `${workspaceName}-${targetName}-${basename(projectLocal)}-${command}`;
+  const hash = shortHash(`${targetName}\u0000${projectLocal}\u0000${commandArgs.join("\u0000")}\u0000${workspaceSalt}`);
   const suffix = uniqueToken ? `-${slug(uniqueToken).slice(0, 10)}` : "";
   return `${slug(label)}-${hash}${suffix}`;
 }
@@ -84,8 +84,24 @@ esac
 `;
 }
 
+function windowsCommandRunner(commandArgs) {
+  const command = commandArgs[0];
+  const rest = commandArgs.slice(1).map(quotePowerShell).join(", ");
+  const script = `
+$ErrorActionPreference = 'Stop'
+$cmd = ${quotePowerShell(command)}
+$hnArgs = @(${rest})
+& $cmd @hnArgs
+exit $LASTEXITCODE
+`;
+  return ["powershell.exe", "-NoLogo", "-NoProfile", "-EncodedCommand", encodePowerShell(script)];
+}
+
 function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, paneName) {
   if (worker.platform === "windows") {
+    // Always launch through PowerShell so native executables, .cmd shims (npm,
+    // Claude/Codex installs), aliases, and built-ins resolve consistently.
+    const paneCommand = windowsCommandRunner(commandArgs);
     const elements = [
       quotePowerShell("--session"),
       quotePowerShell(sessionName),
@@ -100,7 +116,7 @@ function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, p
       quotePowerShell("--name"),
       quotePowerShell(paneName),
       quotePowerShell("--"),
-      ...commandArgs.map(quotePowerShell),
+      ...paneCommand.map(quotePowerShell),
     ];
     const script = `
 $ErrorActionPreference = 'Stop'

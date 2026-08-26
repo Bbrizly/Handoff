@@ -28,22 +28,22 @@ hn workspace add main ~/Obsidian
 hn workspace add main ~/Downloads
 ```
 
-Target names are just aliases. Add any SSH-reachable machine:
+Target names are aliases. Add any SSH-reachable machine:
 
 ```bash
 hn worker add home user@home-machine
 hn worker add aws ubuntu@server.example.com
 ```
 
-Tailscale is optional; LAN, VPN, or any other working SSH route is fine.
+Tailscale is optional; LAN, VPN, or any other working SSH route is fine. For literal IPv6 targets, use an SSH hostname/alias (for example Tailscale MagicDNS or `~/.ssh/config`) because Mutagen's SCP-style endpoint parser cannot encode a literal IPv6 address directly.
 
 ## Daily use
 
 ```bash
 hn          # status
-hn pc       # use pc
-hn home     # use home
-hn aws      # use aws
+hn pc       # switch locally to pc (instant)
+hn home     # switch locally to home
+hn aws      # switch locally to aws
 ```
 
 From a local project:
@@ -55,9 +55,9 @@ hn codex
 hn npm run dev
 ```
 
-`hn` synchronizes every root in the workspace. Claude and Codex automatically receive the other workspace roots through `--add-dir`.
+Before starting a remote command, `hn` synchronizes every workspace root and waits for a Mutagen sync cycle to finish. It refuses to start remote work when conflicts or an unhealthy sync are detected. Claude and Codex automatically receive the other workspace roots through `--add-dir`.
 
-A normal command reattaches its persistent project session. Start another independent session with:
+A normal command reattaches its persistent project/target session. Start another independent session with:
 
 ```bash
 hn new claude
@@ -84,6 +84,8 @@ hn aws claude
 ## Git model
 
 `.git` never synchronizes. Your local checkout is the authoritative Git repository. Remote tools edit the synchronized working tree; those edits appear locally as ordinary Git changes.
+
+Because remote Codex has no `.git`, `hn` automatically supplies Codex's `--skip-git-repo-check` for `codex exec`. Full remote Git-aware agent operations are intentionally deferred to a future local Git bridge instead of maintaining a second repository.
 
 ## Worker support
 

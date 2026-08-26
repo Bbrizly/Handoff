@@ -65,8 +65,10 @@ function sessionNames(kind, { ensure = true } = {}) {
 }
 
 function endpointHost(worker) {
-  const host = worker.host.includes(":") ? `[${worker.host}]` : worker.host;
-  return `${worker.user ? `${worker.user}@` : ""}${host}${worker.port && worker.port !== 22 ? `:${worker.port}` : ""}`;
+  if (String(worker.host).includes(":")) {
+    fail("Mutagen's SSH endpoint syntax cannot encode a literal IPv6 address. Use an SSH hostname/alias (for example Tailscale MagicDNS or ~/.ssh/config) for this target.");
+  }
+  return `${worker.user ? `${worker.user}@` : ""}${worker.host}${worker.port && worker.port !== 22 ? `:${worker.port}` : ""}`;
 }
 
 export function mutagenEndpoint(worker, remotePath) {
@@ -85,14 +87,24 @@ export function ensureSyncRoot(workspaceName, targetName, worker, root) {
   const name = syncSessionName(workspaceName, targetName, worker, root);
   if (sessionNames("sync").includes(name)) {
     runMutagen(["sync", "resume", name], { capture: true, allowFailure: true });
-    return name;
+    return { name, created: false };
   }
 
   const args = ["sync", "create", "--name", name, "--sync-mode", "two-way-safe", "--ignore-vcs"];
   for (const pattern of DEFAULT_IGNORES) args.push("--ignore", pattern);
   args.push(root.local, mutagenEndpoint(worker, root.remote));
   runMutagen(args);
-  return name;
+  return { name, created: true };
+}
+
+export function parseSyncStatusOutput(output) {
+  const [description = "unknown", visibleText = "0", excludedText = "0"] = String(output).trim().split("|");
+  const visible = Number.parseInt(visibleText, 10) || 0;
+  const excluded = Number.parseInt(excludedText, 10) || 0;
+  return {
+    state: description.trim().toLowerCase() || "unknown",
+    conflicts: visible + excluded,
+  };
 }
 
 export function getSyncStatus(name) {
@@ -101,16 +113,38 @@ export function getSyncStatus(name) {
     return { state: "not-started", conflicts: 0 };
   }
 
+  const template = "{{range .}}{{.Status.Description}}|{{if .SessionState}}{{len .Conflicts}}|{{.ExcludedConflicts}}{{else}}0|0{{end}}{{end}}";
   const result = runMutagen(
-    ["sync", "list", name, "--template", "{{range .}}{{.Status.Description}}|{{len .Conflicts}}{{end}}"],
+    ["sync", "list", name, "--template", template],
     { capture: true, allowFailure: true, ensure: false },
   );
   if (result.code !== 0) return { state: "error", conflicts: 0 };
-  const [description = "unknown", conflictText = "0"] = result.stdout.trim().split("|");
-  return {
-    state: description.trim().toLowerCase() || "unknown",
-    conflicts: Number.parseInt(conflictText, 10) || 0,
-  };
+  return parseSyncStatusOutput(result.stdout);
+}
+
+export function flushSyncSessions(names) {
+  const sessions = [...new Set(names.filter(Boolean))];
+  if (!sessions.length) return;
+
+  // Mutagen flush blocks until a synchronization cycle completes unless
+  // --skip-wait is supplied. This prevents remote commands from starting
+  // against an incomplete first sync or stale local edits.
+  runMutagen(["sync", "flush", ...sessions], { capture: true });
+
+  for (const name of sessions) {
+    const status = getSyncStatus(name);
+    if (status.conflicts > 0) {
+      fail(`Mutagen sync '${name}' has ${status.conflicts} conflict${status.conflicts === 1 ? "" : "s"}. Run 'hn status' before starting remote work.`);
+    }
+    if (
+      ["error", "mutagen-missing", "not-started"].includes(status.state)
+      || status.state.includes("disconnected")
+      || status.state.includes("halted")
+      || status.state.includes("waiting for rescan")
+    ) {
+      fail(`Mutagen sync '${name}' is not healthy (${status.state}). Run 'hn status' for details.`);
+    }
+  }
 }
 
 export function showSyncStatus(name) {
