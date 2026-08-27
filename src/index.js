@@ -31,18 +31,23 @@ import {
   ensureSyncRoot,
   flushSyncSessions,
   getSyncStatus,
-  isMutagenInstalled,
+  isSyncBackendInstalled,
+  listForwards,
+  listSyncSessions,
+  stopForward,
+  stopSyncSession,
   syncSessionName,
-} from "./mutagen.js";
+} from "./sync.js";
 import { findContext, mapLocalToRemote, tryFindContext } from "./resolve.js";
 import {
   attachSession,
   ensurePersistentCommand,
+  killSession,
   listSessions,
   newSessionToken,
   sessionNameFor,
   shellCommand,
-} from "./zellij.js";
+} from "./session.js";
 import { runRemoteCommand } from "./remote.js";
 import { fail, normalizeName } from "./util.js";
 
@@ -93,8 +98,13 @@ Inspect/admin:
   hn worker default <target>
   hn workspace list
   hn sync [workspace]
+  hn sync list
+  hn sync stop [workspace]
   hn sessions
+  hn sessions kill <session>
   hn attach <session>
+  hn port list
+  hn port stop <forward>
 `);
 }
 
@@ -215,7 +225,7 @@ function printWorkerChecks(name, checks, trust) {
   for (const key of ["ssh", "zellij", "claude", "codex", "node"]) {
     console.log(`  ${checks[key] ? "✓" : "✗"} ${key}`);
   }
-  console.log(`  ${isMutagenInstalled() ? "✓" : "✗"} mutagen (controller)`);
+  console.log(`  ${isSyncBackendInstalled() ? "✓" : "✗"} mutagen (controller)`);
 }
 
 function selectTarget(config, nameInput, { quiet = false } = {}) {
@@ -290,6 +300,29 @@ function syncWholeWorkspace(config, workspaceName, workspace) {
   console.log(`syncing ${workspaceName} -> ${target.name}...`);
   flushSyncSessions(sessions.map((session) => session.name));
   console.log("sync ✓");
+}
+
+function printRecords(records, emptyText) {
+  if (!records.length) {
+    console.log(emptyText);
+    return;
+  }
+  for (const record of records) console.log(`${record.name}\t${record.identifier}`);
+}
+
+function stopWorkspaceSync(config, workspaceName) {
+  const workspace = requireWorkspace(config, workspaceName);
+  const target = targetFor(config);
+  const existing = new Map(listSyncSessions().map((record) => [record.name, record]));
+  let stopped = 0;
+  for (const root of workspace.roots ?? []) {
+    const name = syncSessionName(workspaceName, target.name, target.worker, root);
+    const record = existing.get(name);
+    if (!record) continue;
+    stopSyncSession(record.identifier);
+    stopped += 1;
+  }
+  console.log(stopped ? `stopped ${stopped} sync session${stopped === 1 ? "" : "s"}` : "No active Handoff syncs for that workspace/target.");
 }
 
 function runPersistent(config, commandArgs, { unique = false, preparedWorker = null } = {}) {
@@ -475,8 +508,22 @@ async function main() {
   }
 
   if (command === "sync") {
-    if (args[0]) {
-      const workspaceName = normalizeName(args[0], "workspace name");
+    const [sub, ...rest] = args;
+    if (sub === "list") {
+      printRecords(listSyncSessions(), "No Handoff sync sessions.");
+      return;
+    }
+    if (sub === "stop") {
+      const context = tryFindContext(config, process.cwd());
+      const workspaceName = rest[0]
+        ? normalizeName(rest[0], "workspace name")
+        : context?.name;
+      if (!workspaceName) fail("Usage: hn sync stop <workspace>");
+      stopWorkspaceSync(config, workspaceName);
+      return;
+    }
+    if (sub) {
+      const workspaceName = normalizeName(sub, "workspace name");
       syncWholeWorkspace(config, workspaceName, requireWorkspace(config, workspaceName));
     } else {
       const context = currentContext(config);
@@ -488,6 +535,13 @@ async function main() {
   if (command === "sessions") {
     const target = targetFor(config);
     const worker = prepareTarget(config, target.name);
+    if (args[0] === "kill") {
+      requireArgs(args.slice(1), 1, "hn sessions kill <session>");
+      killSession(worker, args[1]);
+      console.log(`killed ${args[1]}`);
+      return;
+    }
+    if (args.length && args[0] !== "list") fail("Usage: hn sessions [list|kill <session>]");
     const result = listSessions(worker);
     process.stdout.write(result.stdout || "No Handoff sessions.\n");
     return;
@@ -502,6 +556,16 @@ async function main() {
   }
 
   if (command === "port") {
+    if (args[0] === "list") {
+      printRecords(listForwards(), "No Handoff port forwards.");
+      return;
+    }
+    if (args[0] === "stop") {
+      requireArgs(args.slice(1), 1, "hn port stop <forward-name-or-id>");
+      const stopped = stopForward(args[1]);
+      console.log(`stopped ${stopped.name}`);
+      return;
+    }
     requireArgs(args, 1, "hn port <remote-port> [local-port]");
     const context = currentContext(config);
     const worker = prepareTarget(config, context.targetName);
