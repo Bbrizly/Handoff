@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { fail, quotePosix } from "./util.js";
 
+const POWERSHELL_SAFE_ENCODED_LENGTH = 6000;
+
 function parseHostPort(input) {
   if (input.startsWith("[")) {
     const match = input.match(/^\[([^\]]+)\](?::(\d+))?$/);
@@ -67,12 +69,51 @@ export function encodePowerShell(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }
 
-export function runSsh(worker, remoteArgs = [], { tty = false, capture = false, allowFailure = false, timeoutMs } = {}) {
+export function powerShellInvocation(script) {
+  const wrapped = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
+  const encoded = encodePowerShell(wrapped);
+  const base = [
+    "powershell.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-OutputFormat",
+    "Text",
+  ];
+
+  // Windows/OpenSSH can reject large remote argv strings before PowerShell ever
+  // starts. Keep normal commands encoded, but stream oversized scripts on stdin.
+  if (encoded.length > POWERSHELL_SAFE_ENCODED_LENGTH) {
+    return {
+      args: [...base, "-Command", "-"],
+      input: wrapped,
+    };
+  }
+
+  return {
+    args: [...base, "-EncodedCommand", encoded],
+    input: null,
+  };
+}
+
+export function runSsh(
+  worker,
+  remoteArgs = [],
+  { tty = false, capture = false, allowFailure = false, timeoutMs, input = null } = {},
+) {
   const args = [...baseArgs(worker, tty), ...remoteArgs];
+  const hasInput = input !== null && input !== undefined;
+  const stdio = capture
+    ? [hasInput ? "pipe" : "ignore", "pipe", "pipe"]
+    : hasInput
+      ? ["pipe", "inherit", "inherit"]
+      : "inherit";
+
   const result = spawnSync("ssh", args, {
-    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    stdio,
     encoding: capture ? "utf8" : undefined,
     timeout: timeoutMs,
+    input: hasInput ? input : undefined,
   });
 
   if (result.error) {
@@ -91,22 +132,8 @@ export function runSsh(worker, remoteArgs = [], { tty = false, capture = false, 
 }
 
 export function runPowerShell(worker, script, options = {}) {
-  const wrapped = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
-  const encoded = encodePowerShell(wrapped);
-  return runSsh(
-    worker,
-    [
-      "powershell.exe",
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-OutputFormat",
-      "Text",
-      "-EncodedCommand",
-      encoded,
-    ],
-    options,
-  );
+  const invocation = powerShellInvocation(script);
+  return runSsh(worker, invocation.args, { ...options, input: invocation.input });
 }
 
 export function runPosix(worker, script, options = {}) {

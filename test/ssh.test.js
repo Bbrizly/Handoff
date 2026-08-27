@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSshTarget } from "../src/ssh.js";
+import { parseSshTarget, powerShellInvocation } from "../src/ssh.js";
 
 test("parseSshTarget parses user and host", () => {
   assert.deepEqual(parseSshTarget("bassam@100.64.0.10"), {
@@ -23,4 +23,18 @@ test("parseSshTarget parses bracketed IPv6", () => {
   assert.equal(result.target, "me@fd7a:115c:a1e0::1");
   assert.equal(result.host, "fd7a:115c:a1e0::1");
   assert.equal(result.port, 2200);
+});
+
+test("short PowerShell scripts stay in EncodedCommand argv", () => {
+  const invocation = powerShellInvocation("Write-Output 'ok'");
+  assert.ok(invocation.args.includes("-EncodedCommand"));
+  assert.equal(invocation.input, null);
+});
+
+test("large PowerShell scripts stream over stdin instead of argv", () => {
+  const invocation = powerShellInvocation(`Write-Output '${"x".repeat(7000)}'`);
+  assert.ok(!invocation.args.includes("-EncodedCommand"));
+  assert.deepEqual(invocation.args.slice(-2), ["-Command", "-"]);
+  assert.match(invocation.input, /Write-Output/);
+  assert.match(invocation.input, /SilentlyContinue/);
 });
