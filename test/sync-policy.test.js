@@ -27,6 +27,27 @@ test("generated output and secrets are ignored at any workspace depth", () => {
   assert.ok(!DEFAULT_IGNORES.includes("obj/"), "obj/ would only match the sync root in Mutagen");
 });
 
+test("agent profiles preserve portable built tools without copying dependencies or secrets", () => {
+  const policy = syncPolicy(
+    { local: "/missing", policy: "agent-profile" },
+    { platform: "windows" },
+  );
+  assert.ok(policy.ignores.includes("node_modules"));
+  assert.ok(policy.ignores.includes(".env"));
+  assert.ok(!policy.ignores.includes("dist"));
+  assert.ok(!policy.ignores.includes("bin"));
+});
+
+test("a file root that Windows cannot name fails before the session is created", () => {
+  assert.throws(
+    () => syncPolicy(
+      { local: "/missing", kind: "file", remote: "hn/main/files/aux.md" },
+      { platform: "windows" },
+    ),
+    /Windows cannot represent remote file/,
+  );
+});
+
 test("root .hnignore extends the session ignore list", () => {
   const root = mkdtempSync(join(tmpdir(), "hn-ignore-"));
   try {
@@ -84,5 +105,19 @@ test("non-portable symlink preflight ignores exact absolute links but skips Clau
     assert.ok(policy.ignores.includes("project/.claude/.agents/skills/tool"));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("relative symlinks that escape a sync root are non-portable", { skip: process.platform === "win32" }, () => {
+  const temp = mkdtempSync(join(tmpdir(), "hn-escaping-link-"));
+  try {
+    const root = join(temp, "skills");
+    const outside = join(temp, "agents", "skill");
+    mkdirSync(root, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    symlinkSync("../agents/skill", join(root, "linked"));
+    assert.deepEqual(findNonPortableSymlinks(root), ["linked"]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
   }
 });

@@ -33,6 +33,14 @@ test("sync session identity changes when target changes", () => {
   assert.notEqual(pcName, awsName);
 });
 
+test("specialized root policies use isolated synchronization sessions", () => {
+  const pc = { user: "me", host: "pc", target: "me@pc", port: 22 };
+  assert.notEqual(
+    syncSessionName("main", "pc", pc, root),
+    syncSessionName("main", "pc", pc, { ...root, policy: "agent-profile" }),
+  );
+});
+
 test("sync policy v2 gets a versioned session name and can identify v1", () => {
   const pc = { user: "me", host: "pc", target: "me@pc", port: 22 };
   const current = syncSessionName("main", "pc", pc, root);

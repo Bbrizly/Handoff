@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { basename } from "node:path";
+import { explainWorkspaceAccess } from "./access.js";
 import {
   loadConfig,
   requireWorker,
@@ -23,8 +24,10 @@ import {
   removeWorkspace,
   removeWorkspaceRoot,
   revokeWorkspaceTarget,
+  remoteRootDirectory,
   setWorkerTrust,
   workspaceAllowsTarget,
+  workspaceRootsForTarget,
 } from "./workspace.js";
 import { bootstrapWorker, detectWorker, doctorWorker, ensureRemoteDirectories } from "./worker.js";
 import {
@@ -50,11 +53,12 @@ import {
   shellCommand,
 } from "./session.js";
 import { runInteractiveRemoteCommand, runRemoteCommand } from "./remote.js";
+import { claudeProfileRoots, enableClaudeProfile } from "./profile.js";
 import { fail, normalizeName } from "./util.js";
 
 const RESERVED_COMMANDS = new Set([
   "help", "status", "doctor", "worker", "workspace", "sync", "sessions", "attach",
-  "port", "exec", "shell", "session", "new", "on", "use",
+  "port", "exec", "shell", "session", "new", "on", "use", "profile", "access",
 ]);
 const TARGET_HINTS = new Set(["home", "pc", "aws", "local"]);
 
@@ -88,6 +92,9 @@ Workspace setup:
   hn workspace add main ~/GitHub
   hn workspace add main ~/Obsidian
   hn workspace add main ~/Downloads
+  hn workspace add main ~/notes.md       # share exactly one file
+  hn profile enable claude [workspace]   # personal skills/tools on trusted targets
+  hn access [path]                       # explain whether and where a path is shared
 
 Remote-target privacy:
   hn workspace grant main aws
@@ -155,6 +162,13 @@ function workspaceSalt(workspace) {
     .join("\u0000");
 }
 
+function targetWorkspace(context) {
+  return {
+    ...context.workspace,
+    roots: workspaceRootsForTarget(context.workspace, context.worker),
+  };
+}
+
 function requireWorkspacePermission(context) {
   if (workspaceAllowsTarget(context.workspace, context.targetName, context.worker)) return;
   fail(
@@ -165,8 +179,9 @@ function requireWorkspacePermission(context) {
 
 function ensureWorkspaceSync(context) {
   requireWorkspacePermission(context);
-  ensureRemoteDirectories(context.worker, context.workspace.roots.map((root) => root.remote));
-  const sessions = context.workspace.roots.map((root) =>
+  const workspace = targetWorkspace(context);
+  ensureRemoteDirectories(context.worker, workspace.roots.map(remoteRootDirectory));
+  const sessions = workspace.roots.map((root) =>
     ensureSyncRoot(context.name, context.targetName, context.worker, root),
   );
   if (sessions.some((session) => session.created)) {
@@ -215,6 +230,10 @@ function printStatus(config, workspaceName = undefined) {
   if (!workspaceAllowsTarget(workspace, targetName, worker)) console.log("grant      required before sync");
 
   for (const root of workspace.roots ?? []) {
+    if (root.scope === "trusted" && (worker.trust ?? "trusted") !== "trusted") {
+      console.log(`sync       private  ${basename(root.local)}`);
+      continue;
+    }
     const session = syncSessionName(resolvedWorkspaceName, targetName, worker, root);
     const status = getSyncStatus(session);
     console.log(`sync       ${syncStatusText(status)}  ${basename(root.local)}`);
@@ -294,8 +313,9 @@ function syncWholeWorkspace(config, workspaceName, workspace) {
   const worker = prepareTarget(config, target.name);
   const context = { name: workspaceName, workspace, targetName: target.name, worker };
   requireWorkspacePermission(context);
-  ensureRemoteDirectories(worker, workspace.roots.map((root) => root.remote));
-  const sessions = workspace.roots.map((root) =>
+  const roots = workspaceRootsForTarget(workspace, worker);
+  ensureRemoteDirectories(worker, roots.map(remoteRootDirectory));
+  const sessions = roots.map((root) =>
     ensureSyncRoot(workspaceName, target.name, worker, root),
   );
   console.log(`syncing ${workspaceName} -> ${target.name}...`);
@@ -333,7 +353,7 @@ function runPersistent(config, commandArgs, { unique = false, preparedWorker = n
   ensureWorkspaceSync(context);
 
   const remoteCwd = mapLocalToRemote(context.root, process.cwd());
-  const remoteArgs = augmentAgentCommand(commandArgs, context.workspace, remoteCwd);
+  const remoteArgs = augmentAgentCommand(commandArgs, targetWorkspace(context), remoteCwd);
   const sessionName = sessionNameFor(
     context.name,
     context.targetName,
@@ -354,7 +374,7 @@ function runInteractive(config, targetName, commandArgs = [], { preparedWorker =
 
   const remoteCwd = mapLocalToRemote(context.root, process.cwd());
   const remoteArgs = commandArgs.length
-    ? augmentAgentCommand(commandArgs, context.workspace, remoteCwd)
+    ? augmentAgentCommand(commandArgs, targetWorkspace(context), remoteCwd)
     : [];
   runInteractiveRemoteCommand(worker, remoteCwd, remoteArgs);
 }
@@ -401,6 +421,82 @@ async function main() {
   if (command === "status") {
     printStatus(config, args[0]);
     return;
+  }
+
+  if (command === "access") {
+    const local = args[0] ?? process.cwd();
+    const result = explainWorkspaceAccess(config, local, args[1]);
+    if (result.state === "outside") {
+      const context = tryFindContext(config, process.cwd());
+      console.log(`not shared  ${result.local}`);
+      if (context) console.log(`add it       hn workspace add ${context.name} ${JSON.stringify(result.local)}`);
+      return;
+    }
+    const privacy = result.root.scope === "trusted" ? "  trusted targets only" : "";
+    if (result.state === "local-only") {
+      console.log(`local only  ${result.local}`);
+      console.log(`reason      ${result.reason}`);
+      return;
+    }
+    console.log(`shared ✓    ${result.local}`);
+    console.log(`remote      ~/${result.remote}${privacy}`);
+    console.log(`workspace   ${result.workspaceName}  ${result.root.kind}`);
+    return;
+  }
+
+  if (command === "profile") {
+    const [sub, tool, workspaceInput] = args;
+    if (sub === "enable" && tool === "claude") {
+      const context = tryFindContext(config, process.cwd());
+      const workspaceName = workspaceInput ?? context?.name;
+      if (!workspaceName) fail("Usage: hn profile enable claude <workspace>");
+      requireWorkspace(config, workspaceName);
+      const roots = enableClaudeProfile(config, workspaceName);
+      if (!roots.length) fail("No portable Claude profile directories were found on this machine.");
+      console.log(`Claude profile enabled for trusted targets in workspace '${workspaceName}':`);
+      for (const root of roots) console.log(`  ${root.local} <-> ~/${root.remote}`);
+      console.log("kept local: credentials, settings, MCP auth, plugins, history, sessions, caches");
+      if (!resolveActiveTargetName(config)) {
+        console.log("no target configured yet; run 'hn sync' once you add one");
+        return;
+      }
+      syncWholeWorkspace(config, workspaceName, requireWorkspace(config, workspaceName));
+      return;
+    }
+    if (sub === "disable" && tool === "claude") {
+      const context = tryFindContext(config, process.cwd());
+      const workspaceName = workspaceInput ?? context?.name;
+      if (!workspaceName) fail("Usage: hn profile disable claude <workspace>");
+      const roots = claudeProfileRoots(requireWorkspace(config, workspaceName));
+      if (!roots.length) {
+        console.log("No portable profiles enabled.");
+        return;
+      }
+      // Turning sharing off must not trigger a first-time sync-backend install.
+      const live = new Map(
+        isSyncBackendInstalled() ? listSyncSessions().map((record) => [record.name, record]) : [],
+      );
+      for (const root of roots) {
+        for (const [targetName, worker] of Object.entries(config.workers)) {
+          const record = live.get(syncSessionName(workspaceName, targetName, worker, root));
+          if (record) stopSyncSession(record.identifier);
+        }
+        removeWorkspaceRoot(config, workspaceName, root.local);
+        console.log(`removed ${root.local}`);
+      }
+      console.log("copies already on a worker stay there until you delete them on that machine");
+      return;
+    }
+    if (sub === "list" || sub === "status") {
+      const context = tryFindContext(config, process.cwd());
+      const workspaceName = tool ?? context?.name;
+      if (!workspaceName) fail("Usage: hn profile list <workspace>");
+      const roots = claudeProfileRoots(requireWorkspace(config, workspaceName));
+      if (!roots.length) console.log("No portable profiles enabled.");
+      for (const root of roots) console.log(`claude  ${root.local} <-> ~/${root.remote}  trusted-only`);
+      return;
+    }
+    fail("Usage: hn profile <enable claude [workspace]|disable claude [workspace]|list [workspace]>");
   }
 
   if (command === "doctor") {
@@ -489,9 +585,9 @@ async function main() {
       return;
     }
     if (sub === "add") {
-      requireArgs(rest, 2, "hn workspace add <workspace> <local-path> [remote-path]");
+      requireArgs(rest, 2, "hn workspace add <workspace> <local-file-or-directory> [remote-path]");
       const root = addWorkspaceRoot(config, rest[0], rest[1], rest[2]);
-      console.log(`${root.local} <-> ${root.remote}`);
+      console.log(`${root.kind}  ${root.local} <-> ${root.remote}`);
       return;
     }
     if (sub === "remove-root") {
@@ -519,7 +615,12 @@ async function main() {
     if (sub === "list") {
       for (const [name, workspace] of Object.entries(config.workspaces)) {
         console.log(name);
-        for (const root of workspace.roots ?? []) console.log(`  ${root.local} <-> ${root.remote}`);
+        for (const root of workspace.roots ?? []) {
+          const flags = [root.kind, root.scope === "trusted" ? "trusted-only" : null, root.purpose]
+            .filter(Boolean)
+            .join(", ");
+          console.log(`  ${root.local} <-> ${root.remote}${flags ? `  [${flags}]` : ""}`);
+        }
         if ((workspace.grants ?? []).length) console.log(`  remote grants: ${workspace.grants.join(", ")}`);
       }
       return;
@@ -607,7 +708,7 @@ async function main() {
     context = { ...context, worker };
     ensureWorkspaceSync(context);
     const remoteCwd = mapLocalToRemote(context.root, process.cwd());
-    runRemoteCommand(worker, remoteCwd, augmentAgentCommand(args, context.workspace, remoteCwd));
+    runRemoteCommand(worker, remoteCwd, augmentAgentCommand(args, targetWorkspace(context), remoteCwd));
     return;
   }
 

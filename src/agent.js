@@ -29,7 +29,9 @@ export function additionalWorkspaceDirs(workspace, remoteCwd) {
   const cwd = normalizeRemote(remoteCwd);
   const dirs = [];
   for (const root of workspace.roots ?? []) {
-    const relative = posix.relative(cwd, normalizeRemote(root.remote)) || ".";
+    if (root.purpose === "claude-profile") continue;
+    const remote = root.kind === "file" ? posix.dirname(normalizeRemote(root.remote)) : normalizeRemote(root.remote);
+    const relative = posix.relative(cwd, remote) || ".";
     if (relative !== "." && !dirs.includes(relative)) dirs.push(relative);
   }
   return dirs;

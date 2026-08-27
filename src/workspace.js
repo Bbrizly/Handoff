@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { posix } from "node:path";
 import { defaultRemoteRoot, isInside, normalizeLocalPath } from "./resolve.js";
 import { requireWorker, updateConfig } from "./config.js";
 import { fail, normalizeName } from "./util.js";
@@ -11,6 +12,28 @@ export function normalizeRemotePath(input) {
   const segments = value.split("/").filter(Boolean);
   if (segments.includes("..")) fail("Remote paths cannot contain '..'.");
   return value;
+}
+
+export function classifyWorkspaceRoot(local) {
+  let stat;
+  try {
+    stat = statSync(local);
+  } catch {
+    fail(`Local path does not exist: ${local}`);
+  }
+  if (stat.isDirectory()) return "directory";
+  if (stat.isFile()) return "file";
+  fail(`Workspace paths must be directories or regular files: ${local}`);
+}
+
+export function remoteRootDirectory(root) {
+  return root.kind === "file" ? posix.dirname(root.remote) : root.remote;
+}
+
+export function workspaceRootsForTarget(workspace, worker) {
+  return (workspace.roots ?? []).filter((root) =>
+    root.scope !== "trusted" || (worker.trust ?? "trusted") === "trusted",
+  );
 }
 
 export function remotePathsOverlap(first, second) {
@@ -99,10 +122,11 @@ function validateRootAgainstConfig(config, workspaceName, local, remote, existin
   }
 }
 
-export function addWorkspaceRoot(config, workspaceNameInput, localInput, remoteInput) {
+export function addWorkspaceRoot(config, workspaceNameInput, localInput, remoteInput, metadata = {}) {
   const workspaceName = normalizeName(workspaceNameInput, "workspace name");
   const local = normalizeLocalPath(localInput);
   if (!existsSync(local)) fail(`Local path does not exist: ${local}`);
+  const kind = classifyWorkspaceRoot(local);
   const remote = normalizeRemotePath(remoteInput || defaultRemoteRoot(workspaceName, local));
 
   updateConfig(config, (latest) => {
@@ -110,10 +134,11 @@ export function addWorkspaceRoot(config, workspaceNameInput, localInput, remoteI
     const workspace = latest.workspaces[workspaceName];
     const existing = workspace.roots.find((root) => normalizeLocalPath(root.local) === local);
     validateRootAgainstConfig(latest, workspaceName, local, remote, existing ? local : null);
-    if (existing) existing.remote = remote;
-    else workspace.roots.push({ local, remote });
+    const details = { ...metadata, local, remote, kind };
+    if (existing) Object.assign(existing, details);
+    else workspace.roots.push(details);
   });
-  return { local, remote };
+  return { ...metadata, local, remote, kind };
 }
 
 export function removeWorkspaceRoot(config, workspaceNameInput, localInput) {

@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fail } from "./util.js";
 
-const CONFIG_VERSION = 3;
+const CONFIG_VERSION = 4;
 const HN_DIR = join(homedir(), ".hn");
 const CONFIG_PATH = join(HN_DIR, "config.json");
 const CONFIG_BACKUP_PATH = join(HN_DIR, "config.backup.json");
@@ -50,6 +50,7 @@ export function normalizeConfig(input = {}) {
     const roots = Array.isArray(workspace.roots)
       ? workspace.roots.map((root) => ({
           ...root,
+          kind: root?.kind === "file" ? "file" : "directory",
           remote: typeof root?.remote === "string"
             ? root.remote.replace(/^handoff\//, "hn/")
             : root?.remote,

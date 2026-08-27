@@ -16,6 +16,22 @@ test("additional workspace roots are relative to the remote project cwd", () => 
   assert.deepEqual(additionalWorkspaceDirs(workspace, cwd), dirs);
 });
 
+test("individual files expose their remote parent while agent profiles stay implicit", () => {
+  const roots = {
+    roots: [
+      ...workspace.roots,
+      { local: "/Users/me/license.txt", remote: "hn/main/files/license.txt", kind: "file" },
+      {
+        local: "/Users/me/.claude/skills",
+        remote: ".claude/skills",
+        kind: "directory",
+        purpose: "claude-profile",
+      },
+    ],
+  };
+  assert.deepEqual(additionalWorkspaceDirs(roots, cwd), [...dirs, "../../files"]);
+});
+
 test("Claude gets all workspace roots through --add-dir", () => {
   assert.deepEqual(
     augmentAgentCommand(["claude"], workspace, cwd),
