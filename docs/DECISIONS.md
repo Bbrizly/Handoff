@@ -134,7 +134,7 @@ Rejected workaround: solve Windows session persistence by routing all Windows us
 
 ## HN-010 — Zellij is the persistent-session backend
 
-**Status:** Accepted, native-Windows lifecycle still being proven
+**Status:** Superseded as a core dependency by HN-059; retained as an optional backend
 
 Zellij was selected over tmux because:
 
@@ -151,7 +151,7 @@ Rejected: tmux as the universal backend.
 
 ## HN-011 — Persistent sessions are keyed by project + target + command context
 
-**Status:** Accepted
+**Status:** Accepted for explicit persistent sessions; not a requirement of the transparent terminal
 
 A normal persistent command should reconnect to the same logical session.
 
@@ -163,23 +163,23 @@ Identity includes:
 - command arguments;
 - workspace-root mapping salt.
 
-`hn new ...` adds a unique token to intentionally create another session.
+`hn session new ...` adds a unique token to intentionally create another session.
 
 ---
 
 ## HN-012 — Closing the controller terminal must not kill remote interactive work
 
-**Status:** Accepted
+**Status:** Accepted for explicit persistent sessions; not a requirement of the transparent terminal
 
-This is a core product requirement, not a convenience feature.
+This remains the contract for `hn session`, but it no longer gates the core `hn pc` transparent terminal. A direct SSH PTY naturally ends when its controller terminal disconnects.
 
 Success test:
 
 ```text
-hn claude
+hn session claude
 → close local terminal
 → open another terminal
-→ hn claude
+→ hn session claude
 → same remote Claude session returns
 ```
 
@@ -204,7 +204,7 @@ This avoids inventing a filesystem sync protocol inside Handoff.
 
 ## HN-014 — Synchronization mode is `two-way-safe`
 
-**Status:** Accepted
+**Status:** Superseded by HN-060
 
 Both the controller and worker are allowed to produce legitimate file changes.
 
@@ -251,7 +251,7 @@ A proposed optimization was:
 
 ```text
 cd Handoff
-hn claude
+hn session claude
 → synchronize Handoff only
 ```
 
@@ -529,7 +529,7 @@ Do not mark this accepted/proven until the close-terminal/reattach smoke test su
 
 ## HN-036 — `hn pc` / target selection is local-only
 
-**Status:** Accepted
+**Status:** Superseded by HN-058
 
 Selecting a target must not perform SSH/bootstrap just to update local state.
 
@@ -768,3 +768,70 @@ local environment + remote compute
 feel seamless.
 
 Do not let Handoff become a remote desktop, Git host, container platform, VPN, cloud IDE, secret manager, or general infrastructure dashboard unless a future product decision explicitly expands the scope.
+
+---
+
+## HN-057 — The core primitive is a transparent mapped remote terminal
+
+**Status:** Accepted
+
+The daily Handoff path is:
+
+```text
+target
+→ workspace synchronization
+→ interactive SSH PTY
+→ mapped remote cwd
+→ normal native worker shell
+```
+
+Once connected, the user should run Claude, Codex, Cursor CLI, npm, Docker, Python, Zellij, and other tools normally. Core entry and direct interactive commands must not depend on hidden managed sessions.
+
+This is physically proven on the reference native-Windows worker: `hn pc` entered `C:\Users\Lenovo\hn\main\GitHub\Handoff`; Node reported `win32 x64`; Claude and Codex opened; and a remote Vite server was reachable through `hn port`.
+
+---
+
+## HN-058 — A target alias means "take me there"
+
+**Status:** Accepted; supersedes HN-036
+
+```bash
+hn pc
+```
+
+now synchronizes and opens the mapped interactive terminal. It does not merely mutate local target state.
+
+Selection is explicit:
+
+```bash
+hn use pc
+hn worker default pc
+```
+
+Direct forms such as `hn pc claude` use that target for one interactive command without changing the selection.
+
+---
+
+## HN-059 — Managed Zellij persistence is optional
+
+**Status:** Accepted; supersedes HN-010 as a core dependency
+
+Zellij remains installed, available to users inside the transparent terminal, and implemented behind `SessionBackend` for explicit commands:
+
+```bash
+hn session
+hn session claude
+hn session new claude
+```
+
+Native-Windows managed persistence remains experimental. Live forensics showed that WMI detachment works, but a Session 0 attached Zellij anchor receives closed/non-interactive input; its default `cmd.exe` pane and server exit cleanly within roughly 260 ms. This optional issue must not block `hn pc`, `hn pc <command>`, or `hn exec`.
+
+---
+
+## HN-060 — Synchronization mode is `two-way-resolved`
+
+**Status:** Accepted; supersedes HN-014
+
+The controller/Mac is the alpha endpoint. Local-only and remote-only edits both propagate. Only simultaneous divergence on the same path resolves automatically in favor of alpha.
+
+This preserves remote-to-Mac edits while matching the local-canonical product model and removes routine manual conflict handling. Generated artifacts and secrets remain excluded so conflict precedence is reserved for actual synchronized content.

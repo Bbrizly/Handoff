@@ -17,12 +17,12 @@ Browser                                          dev servers
       ▼                                              ▼
      hn ─────────────── SSH control ───────────────► worker
       │                                              │
-      ├──────── Mutagen two-way-safe sync ──────────┤
+      ├──── Mutagen two-way-resolved sync ─────────┤
       │                                              │
       └────── Mutagen TCP forwarding ◄──────────────┘
-
-Persistent commands on worker live inside Zellij sessions.
 ```
+
+The core interactive path is a real SSH PTY into the mapped remote directory. Zellij is an optional layer behind `SessionBackend`, not a prerequisite for entering or using the worker.
 
 Handoff is deliberately a coordinator. It does not replace the editor, Git, network overlay, shell, sync engine, or session multiplexer.
 
@@ -36,6 +36,7 @@ The controller owns:
 - canonical source checkout and `.git`;
 - Mutagen binary/daemon/session control;
 - SSH command/control transport;
+- interactive PTY handoff into mapped remote directories;
 - mapping local paths to remote workspace paths;
 - command augmentation for supported coding agents;
 - local endpoints for forwarded remote ports.
@@ -52,7 +53,7 @@ Legacy configuration:
 ~/.handoff/config.json
 ```
 
-is migrated to config version 2.
+is migrated to config version 3.
 
 Config is written with restrictive file permissions where supported.
 
@@ -66,7 +67,7 @@ A worker provides:
 - project/workspace mirror under the remote user's home;
 - the actual workload tools the user wants to run.
 
-Handoff does not require a worker-side Handoff daemon today.
+Handoff does not require a worker-side Handoff daemon.
 
 Typical remote paths:
 
@@ -84,7 +85,7 @@ Canonical config shape:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "activeTarget": "pc",
   "workers": {
     "pc": {
@@ -198,7 +199,7 @@ Handoff repairs accidental duplicate named Mutagen sessions by preserving the ol
 Accepted mode:
 
 ```text
-two-way-safe
+two-way-resolved
 ```
 
 Git metadata is excluded with:
@@ -207,39 +208,51 @@ Git metadata is excluded with:
 --ignore-vcs
 ```
 
-This means local and remote working-tree changes propagate both ways, but ambiguity becomes a conflict rather than silent data loss.
+This means local and remote working-tree changes propagate both ways. Remote-only changes return to the controller; only a simultaneous collision on the same path resolves in favor of the controller/alpha endpoint.
 
 ### 6.4 Initial seed vs normal operation
 
 The first synchronization of a large workspace may copy many files/gigabytes. That is expected once for each workspace-root/target tuple.
 
-After the baseline exists, Mutagen's persistent session watches/reconciles changes. Starting another Claude session does not intentionally resend the entire workspace.
+After the baseline exists, Mutagen's persistent session watches/reconciles changes. Opening another remote terminal does not intentionally resend the entire workspace.
 
 A restart/reconnect may trigger scanning/reconciliation; scanning is not equivalent to retransferring every byte.
 
 ### 6.5 Current ignore set
 
-Current code ignores:
+Current code ignores generated/cache roots at any workspace depth, including:
 
 ```text
 node_modules/
 dist/
 build/
+bin/
+obj/
 .next/
 .nuxt/
 .output/
+.turbo/
 target/
 .gradle/
+DerivedData/
+.venv/
+venv/
+.tox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
 ```
 
-This set is known to be incomplete. See `KNOWN_ISSUES.md`.
+Project `.claude` content is not ignored wholesale. Generated `.claude/worktrees/`, non-portable absolute symlinks, and exact Windows-incompatible paths are handled narrowly.
 
 ### 6.6 Safety gate before remote work
 
-Before a persistent or remote command starts, Handoff:
+Before an interactive terminal or remote command starts, Handoff:
 
 1. creates remote workspace directories;
 2. ensures/resumes Mutagen sessions for all workspace roots;
@@ -252,7 +265,7 @@ Conflict refusal is a core invariant.
 
 ### 6.7 Progress UX
 
-For a single synchronization session Handoff can invoke Mutagen's monitor output while the flush runs. The intended final UI should summarize that output rather than dump full session metadata every time.
+Explicit `hn sync` can invoke Mutagen's monitor output while the flush runs. Routine `hn pc`, direct commands, and `hn exec` flush quietly when healthy rather than dumping raw session metadata.
 
 Idle healthy sync should become quiet; meaningful initial/large sync should be richly observable.
 
@@ -379,11 +392,28 @@ The generated PowerShell bootstrap:
 
 Current limitation: the bootstrap assumes the paired Windows account is an administrator.
 
-## 12. Zellij architecture
+## 12. Interactive transport and optional sessions
 
-### 12.1 Why Zellij
+### 12.1 Core interactive PTY
 
-Zellij is the persistent session backend because it is cross-platform and has native Windows support. tmux was rejected for the core architecture because native Windows is a requirement and WSL is not.
+Target aliases are executable destinations:
+
+```text
+local cwd
+  -> resolve workspace root
+  -> flush synchronization
+  -> map relative cwd to remote root
+  -> SSH with a real PTY
+  -> native worker shell or direct command
+```
+
+On Windows, Handoff starts profile-aware PowerShell with `-NoExit` for the shell form. It does not weaken execution policy. If PowerShell would choose a blocked `.ps1` wrapper for a supported interactive agent while an application shim exists, the shell receives a process-scoped alias to that application shim.
+
+On POSIX, Handoff enters the user's login shell. Direct forms such as `hn pc claude` execute the command with the same PTY and mapped cwd but do not create a session.
+
+### 12.2 Why Zellij remains available
+
+Zellij remains the optional persistent session backend because it is cross-platform and has native Windows support. tmux and mandatory WSL remain rejected. Core Handoff does not depend on this backend.
 
 Pinned version:
 
@@ -398,7 +428,7 @@ Windows: $HOME\.hn\bin\zellij.exe
 POSIX:   $HOME/.hn/bin/zellij
 ```
 
-### 12.2 Session identity
+### 12.3 Session identity
 
 A stable persistent command session is keyed from:
 
@@ -414,18 +444,18 @@ workspace
 This gives:
 
 ```bash
-hn claude
+hn session claude
 ```
 
 one stable project/target session, while:
 
 ```bash
-hn new claude
+hn session new claude
 ```
 
 creates another.
 
-### 12.3 Pane lifecycle
+### 12.4 Pane lifecycle
 
 The intended lifecycle is:
 
@@ -435,19 +465,19 @@ The intended lifecycle is:
 4. replace the initial shell pane with the desired command in the mapped cwd;
 5. attach interactively over SSH TTY.
 
-### 12.4 Native Windows persistence boundary
+### 12.5 Native Windows persistence boundary
 
-Real native-Windows testing proved a hard integration issue: `zellij attach --create-background` could return success inside an OpenSSH exec channel but no session remained after the SSH command exited.
+Real native-Windows testing proved a narrow optional-backend issue. WMI successfully creates a detached Session 0 process that survives the originating SSH connection, but an attached Zellij anchor in that environment receives closed/non-interactive input. Its default `cmd.exe` pane exits, Zellij prints `Bye from Zellij!`, and the anchor exits cleanly roughly 260 ms after startup. A later connection therefore finds no active session.
 
-Handoff has been iterating on a Windows process-lifetime strategy that detaches Zellij creation from the short-lived SSH process/job using Win32 process creation semantics, plus a stable Handoff-owned Zellij socket directory.
+This disproved the earlier broad hypothesis that Windows OpenSSH simply kills every detached descendant. The remaining work is a supported headless Zellij layout/session-host strategy, isolated behind `SessionBackend`.
 
-This path is **not yet considered fully proven** until a real Windows test demonstrates:
+This optional path is **not yet considered fully proven** until a real Windows test demonstrates:
 
 ```text
-hn claude
+hn session claude
 → Claude opens
 → local terminal closes
-→ hn claude
+→ hn session claude
 → same live session reattaches
 ```
 
@@ -489,15 +519,20 @@ Supported network paths include:
 
 Tailscale is a strong default for personal machines but is not a product dependency.
 
-## 15. Target switching
+## 15. Target invocation and selection
 
-Target selection is intentionally local-only.
+Target aliases mean "take me there":
 
 ```bash
 hn pc
 ```
 
-must not bootstrap, sync, or make SSH calls solely to change the active alias. Expensive validation belongs when a command actually uses the target or when explicitly requested with `hn doctor`.
+This synchronizes the workspace and opens the mapped interactive PTY. Selection without connecting is explicit and local-only:
+
+```bash
+hn use pc
+hn worker default pc
+```
 
 ## 16. Managed dependency strategy
 
@@ -549,8 +584,8 @@ The following should be treated as hard invariants unless an explicit ADR supers
 3. A workspace is not bound to one worker.
 4. `.git` is controller-only.
 5. Workspace synchronization is bidirectional and safe-by-default.
-6. Project context determines command location/session identity but not a narrower implicit sync boundary.
+6. Project context determines mapped command location and optional session identity but not a narrower implicit sync boundary.
 7. Native Windows is supported without WSL.
-8. Persistent interactive work must survive controller-terminal disconnects.
+8. The core mapped interactive terminal must not depend on Zellij or another session manager.
 9. Handoff does not require its own hosted backend.
 10. Network overlay/provider concerns remain separable from core execution.
