@@ -5,6 +5,7 @@ import {
   remotePathsOverlap,
   validateWorkerAssignment,
   workerEndpointsEqual,
+  workspaceAllowsTarget,
 } from "../src/workspace.js";
 
 test("remote paths normalize to portable forward slashes", () => {
@@ -46,4 +47,14 @@ test("one SSH endpoint cannot have two target aliases", () => {
     () => validateWorkerAssignment(config, "home", { user: "me", host: "pc", port: 22, target: "me@pc" }),
     /already points to this SSH endpoint/,
   );
+});
+
+test("trusted targets can use the whole workspace without grants", () => {
+  assert.equal(workspaceAllowsTarget({ roots: [], grants: [] }, "pc", { trust: "trusted" }), true);
+});
+
+test("remote targets require an explicit workspace grant", () => {
+  const workspace = { roots: [], grants: ["aws"] };
+  assert.equal(workspaceAllowsTarget(workspace, "aws", { trust: "remote" }), true);
+  assert.equal(workspaceAllowsTarget(workspace, "hetzner", { trust: "remote" }), false);
 });
