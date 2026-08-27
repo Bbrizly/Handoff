@@ -11,8 +11,21 @@ function zellijPowerShellExpression() {
 export function windowsZellijRuntimeSetup() {
   return `
 $hnZellijSocketDir = Join-Path $HOME '.hn\\zellij-sockets'
+$hnZellijConfigDir = Join-Path $HOME '.hn\\zellij\\config'
 New-Item -ItemType Directory -Force -Path $hnZellijSocketDir | Out-Null
+New-Item -ItemType Directory -Force -Path $hnZellijConfigDir | Out-Null
 $env:ZELLIJ_SOCKET_DIR = $hnZellijSocketDir
+$env:ZELLIJ_CONFIG_DIR = $hnZellijConfigDir
+`;
+}
+
+export function posixZellijRuntimeSetup() {
+  return `
+hn_zellij_socket_dir="$HOME/.hn/zellij-sockets"
+hn_zellij_config_dir="$HOME/.hn/zellij/config"
+mkdir -p -- "$hn_zellij_socket_dir" "$hn_zellij_config_dir"
+export ZELLIJ_SOCKET_DIR="$hn_zellij_socket_dir"
+export ZELLIJ_CONFIG_DIR="$hn_zellij_config_dir"
 `;
 }
 
@@ -34,8 +47,6 @@ try {
   $_ | Out-String | Out-File -FilePath $logFile -Encoding utf8
   $hnCode = 1
 }
-# Keep this launcher alive briefly so the SSH-side caller can verify that WMI
-# created it in the expected user context before it exits.
 Start-Sleep -Milliseconds 800
 exit $hnCode
 `;
@@ -46,8 +57,7 @@ $ErrorActionPreference = 'Stop'
 $hnEnvironment = @(Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" })
 $startup = New-CimInstance -CimClass (Get-CimClass -ClassName Win32_ProcessStartup) -ClientOnly
 # Windows OpenSSH can tear down descendants when an exec channel closes. Spawn
-# the Zellij creator through WMI and explicitly request CREATE_BREAKAWAY_FROM_JOB
-# so the Zellij server is not owned by the short-lived sshd job/process tree.
+# the Zellij creator through WMI and explicitly request CREATE_BREAKAWAY_FROM_JOB.
 $startup.CreateFlags = [uint32]16777216
 $startup.ShowWindow = [uint16]0
 $startup.EnvironmentVariables = [string[]]$hnEnvironment
@@ -88,7 +98,7 @@ exit $LASTEXITCODE
   }
 
   const command = args.map(quotePosix).join(" ");
-  return runPosix(worker, `z="$HOME/.hn/bin/zellij"; "$z" ${command}`, options);
+  return runPosix(worker, `${posixZellijRuntimeSetup()}\nz="$HOME/.hn/bin/zellij"; "$z" ${command}`, options);
 }
 
 export function sessionNameFor(workspaceName, targetName, projectLocal, commandArgs, workspaceSalt = "", uniqueToken = "") {
@@ -96,7 +106,7 @@ export function sessionNameFor(workspaceName, targetName, projectLocal, commandA
   const label = `${workspaceName}-${targetName}-${basename(projectLocal)}-${command}`;
   const hash = shortHash(`${targetName}\u0000${projectLocal}\u0000${commandArgs.join("\u0000")}\u0000${workspaceSalt}`);
   const suffix = uniqueToken ? `-${slug(uniqueToken).slice(0, 10)}` : "";
-  return `${slug(label)}-${hash}${suffix}`;
+  return `hn-${slug(label)}-${hash}${suffix}`;
 }
 
 export function newSessionToken() {
@@ -171,8 +181,8 @@ function diagnosticText(result) {
   return pieces.join("; ");
 }
 
-function killSession(worker, sessionName) {
-  runZellij(worker, ["kill-sessions", sessionName], { capture: true, allowFailure: true });
+export function killSession(worker, sessionName) {
+  runZellij(worker, ["kill-session", sessionName], { capture: true, allowFailure: true });
 }
 
 function windowsZellijLaunchLog(worker, sessionName) {
@@ -246,7 +256,14 @@ exit $LASTEXITCODE
   return ["powershell.exe", "-NoLogo", "-NoProfile", "-EncodedCommand", encodePowerShell(script)];
 }
 
+function replacementPaneArgs(paneId) {
+  return paneId === null || paneId === undefined
+    ? []
+    : ["--in-place", "--close-replaced-pane", "--pane-id", String(paneId)];
+}
+
 function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, paneName) {
+  const replacementArgs = replacementPaneArgs(paneId);
   if (worker.platform === "windows") {
     const paneCommand = windowsCommandRunner(commandArgs);
     const elements = [
@@ -254,10 +271,7 @@ function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, p
       quotePowerShell(sessionName),
       quotePowerShell("action"),
       quotePowerShell("new-pane"),
-      quotePowerShell("--in-place"),
-      quotePowerShell("--close-replaced-pane"),
-      quotePowerShell("--pane-id"),
-      quotePowerShell(String(paneId)),
+      ...replacementArgs.map(quotePowerShell),
       quotePowerShell("--cwd"),
       "$hnCwd",
       quotePowerShell("--name"),
@@ -279,9 +293,10 @@ exit $LASTEXITCODE
   }
 
   const command = commandArgs.map(quotePosix).join(" ");
-  const script = `${posixCwdSetup(remoteCwd)}
+  const replacement = replacementArgs.map(quotePosix).join(" ");
+  const script = `${posixZellijRuntimeSetup()}\n${posixCwdSetup(remoteCwd)}
 z="$HOME/.hn/bin/zellij"
-"$z" --session ${quotePosix(sessionName)} action new-pane --in-place --close-replaced-pane --pane-id ${quotePosix(String(paneId))} --cwd "$hn_cwd" --name ${quotePosix(paneName)} -- ${command}
+"$z" --session ${quotePosix(sessionName)} action new-pane ${replacement} --cwd "$hn_cwd" --name ${quotePosix(paneName)} -- ${command}
 `;
   runPosix(worker, script, { capture: true });
 }
@@ -294,10 +309,13 @@ export function ensurePersistentCommand(worker, sessionName, remoteCwd, commandA
 
   if (panes) killSession(worker, sessionName);
   panes = createBackgroundSession(worker, sessionName);
-  const initialPane = panes.find((pane) => !pane.is_plugin && !pane.exited);
-  if (!initialPane) fail(`Zellij session '${sessionName}' has no terminal pane.`);
+  const initialPane = panes.find((pane) => !pane.is_plugin && !pane.exited) ?? null;
 
-  startCommandPane(worker, sessionName, initialPane.id, remoteCwd, commandArgs, paneName);
+  // In headless/noninteractive environments Zellij can successfully create the
+  // session while its bootstrap shell exits immediately. A live bootstrap pane
+  // is therefore an optimization (replace it in-place), not a correctness
+  // requirement. If it has already exited, create the command as a fresh pane.
+  startCommandPane(worker, sessionName, initialPane?.id ?? null, remoteCwd, commandArgs, paneName);
   inspection = inspectSession(worker, sessionName, { attempts: 30, delayMs: 100 });
   if (!inspection.panes?.some((pane) => paneMatchesCommand(pane, commandArgs, paneName))) {
     fail(`Remote command '${commandArgs[0]}' did not start inside Zellij (${diagnosticText(inspection.result)}).`);
@@ -321,7 +339,7 @@ exit $LASTEXITCODE
 
   return runPosix(
     worker,
-    `exec "$HOME/.hn/bin/zellij" attach ${quotePosix(sessionName)}`,
+    `${posixZellijRuntimeSetup()}\nexec "$HOME/.hn/bin/zellij" attach ${quotePosix(sessionName)}`,
     { tty: true },
   );
 }

@@ -57,6 +57,11 @@ function normalizeArch(value) {
   return arch || "unknown";
 }
 
+export function zellijAssetFor(platform, arch) {
+  const normalizedPlatform = platform === "win32" ? "windows" : platform;
+  return ZELLIJ_ASSETS[`${normalizedPlatform}:${normalizeArch(arch)}`] ?? null;
+}
+
 export function detectWorker(worker) {
   const posix = runPosix(
     worker,
@@ -112,7 +117,7 @@ exit $LASTEXITCODE
 }
 
 function assetFor(worker) {
-  const asset = ZELLIJ_ASSETS[`${worker.platform}:${worker.arch}`];
+  const asset = zellijAssetFor(worker.platform, worker.arch);
   if (!asset) fail(`Zellij ${ZELLIJ_VERSION} has no supported build for ${worker.platform}/${worker.arch}.`);
   return asset;
 }

@@ -6,75 +6,105 @@ import {
   requireWorker,
   requireWorkspace,
   resolveActiveTargetName,
-  saveConfig,
   setActiveTarget,
+  setDefaultTarget,
+  updateConfig,
 } from "./config.js";
 import { augmentAgentCommand } from "./agent.js";
 import { ensureControllerSshKey, windowsPairCommand } from "./pair.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
-import { addWorker, addWorkspaceRoot, createWorkspace } from "./workspace.js";
+import {
+  addWorker,
+  addWorkspaceRoot,
+  createWorkspace,
+  grantWorkspaceTarget,
+  removeWorker,
+  removeWorkspace,
+  removeWorkspaceRoot,
+  revokeWorkspaceTarget,
+  setWorkerTrust,
+  workspaceAllowsTarget,
+} from "./workspace.js";
 import { bootstrapWorker, detectWorker, doctorWorker, ensureRemoteDirectories } from "./worker.js";
 import {
   ensureForward,
   ensureSyncRoot,
   flushSyncSessions,
   getSyncStatus,
-  isMutagenInstalled,
+  isSyncBackendInstalled,
+  listForwards,
+  listSyncSessions,
+  stopForward,
+  stopSyncSession,
   syncSessionName,
-} from "./mutagen.js";
+} from "./sync.js";
 import { findContext, mapLocalToRemote, tryFindContext } from "./resolve.js";
 import {
   attachSession,
   ensurePersistentCommand,
+  killSession,
   listSessions,
   newSessionToken,
   sessionNameFor,
   shellCommand,
-} from "./zellij.js";
+} from "./session.js";
 import { runRemoteCommand } from "./remote.js";
 import { fail, normalizeName } from "./util.js";
 
 const RESERVED_COMMANDS = new Set([
   "help", "status", "doctor", "worker", "workspace", "sync", "sessions", "attach",
-  "port", "exec", "shell", "new",
+  "port", "exec", "shell", "new", "on",
 ]);
-const TARGET_HINTS = new Set(["home", "pc", "aws"]);
+const TARGET_HINTS = new Set(["home", "pc", "aws", "local"]);
 
 function help() {
   console.log(`hn - local files, compute anywhere
 
 Everyday:
-  hn                    status
-  hn pc                 switch active target
-  hn aws claude         switch target + launch Claude
-  hn claude             persistent Claude in this project
-  hn codex              persistent Codex in this project
-  hn new claude         start another Claude session
-  hn shell              persistent remote shell
-  hn npm run dev        persistent arbitrary command
-  hn exec npm test      one-shot remote command
-  hn port 5173          remote 5173 -> local 5173
+  hn                         status
+  hn pc                      use pc in this terminal
+  hn aws claude              use aws in this terminal + launch Claude
+  hn on <target> <command>   one-shot target without changing terminal state
+  HN_TARGET=pc hn claude     explicit environment override
+  hn claude                  persistent Claude in this project
+  hn codex                   persistent Codex in this project
+  hn new claude              start another Claude session
+  hn shell                   persistent remote shell
+  hn npm run dev             persistent arbitrary command
+  hn exec npm test           one-shot remote command
+  hn port 5173               remote 5173 -> local 5173
 
 Windows setup:
   hn worker pair pc <user@host[:port]>
-  # paste the generated command once in Windows PowerShell as Administrator
+  # paste the generated self-contained command once in PowerShell as Administrator
   hn worker finish pc
 
 Already have key-based SSH:
-  hn worker add pc <user@host[:port]>
+  hn worker add aws <user@host[:port]>   # new manual targets default to remote trust
+  hn worker trust aws trusted            # opt in only for machines you fully trust
 
 Workspace setup:
   hn workspace add main ~/GitHub
   hn workspace add main ~/Obsidian
   hn workspace add main ~/Downloads
 
-Inspect:
+Remote-target privacy:
+  hn workspace grant main aws
+  hn workspace revoke main aws
+
+Inspect/admin:
   hn doctor [target]
   hn worker list
+  hn worker default <target>
   hn workspace list
   hn sync [workspace]
+  hn sync list
+  hn sync stop [workspace]
   hn sessions
+  hn sessions kill <session>
   hn attach <session>
+  hn port list
+  hn port stop <forward>
 `);
 }
 
@@ -90,11 +120,18 @@ function targetFor(config) {
 
 function persistWorkerMetadata(config, name, worker) {
   const previous = config.workers[name] ?? {};
-  if (previous.platform !== worker.platform || previous.arch !== worker.arch || previous.pending !== worker.pending) {
-    config.workers[name] = worker;
-    saveConfig(config);
+  if (
+    previous.platform !== worker.platform
+    || previous.arch !== worker.arch
+    || previous.pending !== worker.pending
+    || previous.trust !== worker.trust
+  ) {
+    updateConfig(config, (latest) => {
+      const current = requireWorker(latest, name);
+      latest.workers[name] = { ...current, ...worker };
+    });
   }
-  return worker;
+  return config.workers[name] ?? worker;
 }
 
 function prepareTarget(config, name, { quiet = true } = {}) {
@@ -117,7 +154,16 @@ function workspaceSalt(workspace) {
     .join("\u0000");
 }
 
+function requireWorkspacePermission(context) {
+  if (workspaceAllowsTarget(context.workspace, context.targetName, context.worker)) return;
+  fail(
+    `Target '${context.targetName}' is marked remote and workspace '${context.name}' has not been granted to it. `
+    + `Review the workspace roots, then run: hn workspace grant ${context.name} ${context.targetName}`,
+  );
+}
+
 function ensureWorkspaceSync(context) {
+  requireWorkspacePermission(context);
   ensureRemoteDirectories(context.worker, context.workspace.roots.map((root) => root.remote));
   const sessions = context.workspace.roots.map((root) =>
     ensureSyncRoot(context.name, context.targetName, context.worker, root),
@@ -153,11 +199,9 @@ function printStatus(config, workspaceName = undefined) {
   }
 
   const worker = requireWorker(config, targetName);
-  const ssh = worker.pending
-    ? { code: 1 }
-    : testSsh(worker);
+  const ssh = worker.pending ? { code: 1 } : testSsh(worker);
   const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : (worker.pending ? "pairing" : "unknown");
-  console.log(`target     ${targetName} ${ssh.code === 0 ? "✓" : "✗"}  ${platform}`);
+  console.log(`target     ${targetName} ${ssh.code === 0 ? "✓" : "✗"}  ${platform}  ${worker.trust ?? "trusted"}`);
 
   if (!workspace) {
     console.log("workspace  —");
@@ -167,6 +211,7 @@ function printStatus(config, workspaceName = undefined) {
   const resolvedWorkspaceName = workspaceName ?? context.name;
   console.log(`workspace  ${resolvedWorkspaceName}`);
   if (context) console.log(`project    ${basename(context.projectLocal)}`);
+  if (!workspaceAllowsTarget(workspace, targetName, worker)) console.log("grant      required before sync");
 
   for (const root of workspace.roots ?? []) {
     const session = syncSessionName(resolvedWorkspaceName, targetName, worker, root);
@@ -175,18 +220,18 @@ function printStatus(config, workspaceName = undefined) {
   }
 }
 
-function printWorkerChecks(name, checks) {
-  console.log(`${name}  ${checks.platform}/${checks.arch}`);
+function printWorkerChecks(name, checks, trust) {
+  console.log(`${name}  ${checks.platform}/${checks.arch}  ${trust}`);
   for (const key of ["ssh", "zellij", "claude", "codex", "node"]) {
     console.log(`  ${checks[key] ? "✓" : "✗"} ${key}`);
   }
-  console.log(`  ${isMutagenInstalled() ? "✓" : "✗"} mutagen (controller)`);
+  console.log(`  ${isSyncBackendInstalled() ? "✓" : "✗"} mutagen (controller)`);
 }
 
 function selectTarget(config, nameInput, { quiet = false } = {}) {
   const name = normalizeName(nameInput, "target name");
   requireWorker(config, name);
-  if (config.activeTarget !== name) setActiveTarget(config, name);
+  setActiveTarget(config, name);
   if (!quiet) console.log(name);
   return name;
 }
@@ -201,7 +246,7 @@ function pairTarget(config, nameInput, targetInput) {
   const name = validateTargetName(nameInput);
   const base = parseSshTarget(targetInput);
   const key = ensureControllerSshKey();
-  addWorker(config, name, { ...base, pending: true });
+  addWorker(config, name, { ...base, pending: true, trust: "trusted" });
 
   console.log(key.created ? `created SSH key ${key.privateKey}` : `using SSH key ${key.privateKey}`);
   console.log("\nOn Windows: open PowerShell as Administrator and paste this ONE command:\n");
@@ -220,9 +265,13 @@ function finishTarget(config, nameInput) {
   const detected = { ...worker, ...detectWorker(worker) };
   delete detected.pending;
   const prepared = bootstrapWorker(detected, { quiet: true });
-  config.workers[name] = prepared;
-  saveConfig(config);
-  console.log(`${name} ✓  ${prepared.platform}/${prepared.arch}  ${prepared.target}${prepared.port !== 22 ? `:${prepared.port}` : ""}`);
+  updateConfig(config, (latest) => {
+    const current = requireWorker(latest, name);
+    latest.workers[name] = { ...current, ...prepared, pending: undefined };
+    delete latest.workers[name].pending;
+  });
+  const saved = requireWorker(config, name);
+  console.log(`${name} ✓  ${saved.platform}/${saved.arch}  ${saved.target}${saved.port !== 22 ? `:${saved.port}` : ""}  ${saved.trust}`);
 }
 
 function addTarget(config, nameInput, targetInput) {
@@ -232,15 +281,18 @@ function addTarget(config, nameInput, targetInput) {
   if (ssh.code !== 0) {
     fail(`SSH is not working for ${targetInput}. For a new Windows worker use: hn worker pair ${name} ${targetInput}`);
   }
-  const worker = { ...base, ...detectWorker(base) };
+  const worker = { ...base, ...detectWorker(base), trust: "remote" };
   const prepared = bootstrapWorker(worker, { quiet: true });
   addWorker(config, name, prepared);
-  console.log(`${name} ✓  ${prepared.platform}/${prepared.arch}  ${prepared.target}${prepared.port !== 22 ? `:${prepared.port}` : ""}`);
+  console.log(`${name} ✓  ${prepared.platform}/${prepared.arch}  ${prepared.target}${prepared.port !== 22 ? `:${prepared.port}` : ""}  remote`);
+  console.log(`grant a workspace explicitly before first sync: hn workspace grant <workspace> ${name}`);
 }
 
 function syncWholeWorkspace(config, workspaceName, workspace) {
   const target = targetFor(config);
   const worker = prepareTarget(config, target.name);
+  const context = { name: workspaceName, workspace, targetName: target.name, worker };
+  requireWorkspacePermission(context);
   ensureRemoteDirectories(worker, workspace.roots.map((root) => root.remote));
   const sessions = workspace.roots.map((root) =>
     ensureSyncRoot(workspaceName, target.name, worker, root),
@@ -248,6 +300,29 @@ function syncWholeWorkspace(config, workspaceName, workspace) {
   console.log(`syncing ${workspaceName} -> ${target.name}...`);
   flushSyncSessions(sessions.map((session) => session.name));
   console.log("sync ✓");
+}
+
+function printRecords(records, emptyText) {
+  if (!records.length) {
+    console.log(emptyText);
+    return;
+  }
+  for (const record of records) console.log(`${record.name}\t${record.identifier}`);
+}
+
+function stopWorkspaceSync(config, workspaceName) {
+  const workspace = requireWorkspace(config, workspaceName);
+  const target = targetFor(config);
+  const existing = new Map(listSyncSessions().map((record) => [record.name, record]));
+  let stopped = 0;
+  for (const root of workspace.roots ?? []) {
+    const name = syncSessionName(workspaceName, target.name, target.worker, root);
+    const record = existing.get(name);
+    if (!record) continue;
+    stopSyncSession(record.identifier);
+    stopped += 1;
+  }
+  console.log(stopped ? `stopped ${stopped} sync session${stopped === 1 ? "" : "s"}` : "No active Handoff syncs for that workspace/target.");
 }
 
 function runPersistent(config, commandArgs, { unique = false, preparedWorker = null } = {}) {
@@ -271,7 +346,7 @@ function runPersistent(config, commandArgs, { unique = false, preparedWorker = n
 }
 
 async function main() {
-  const argv = process.argv.slice(2);
+  let argv = process.argv.slice(2);
   if (["help", "--help", "-h"].includes(argv[0])) {
     help();
     return;
@@ -283,13 +358,23 @@ async function main() {
     return;
   }
 
+  if (argv[0] === "on") {
+    requireArgs(argv.slice(1), 2, "hn on <target> <command...>");
+    const name = normalizeName(argv[1], "target name");
+    requireWorker(config, name);
+    process.env.HN_TARGET = name;
+    argv = argv.slice(2);
+  }
+
   let [command, ...args] = argv;
   const possibleTarget = String(command).toLowerCase();
-  if (!RESERVED_COMMANDS.has(possibleTarget) && config.workers[possibleTarget]) {
+  const configuredTarget = config.workers[possibleTarget];
+  const targetShorthandAllowed = args.length === 0 || TARGET_HINTS.has(possibleTarget);
+  if (!RESERVED_COMMANDS.has(possibleTarget) && configuredTarget && targetShorthandAllowed) {
     selectTarget(config, possibleTarget, { quiet: args.length > 0 });
     if (!args.length) return;
     [command, ...args] = args;
-  } else if (TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
+  } else if (TARGET_HINTS.has(possibleTarget) && !configuredTarget) {
     fail(`Target '${possibleTarget}' is not configured. Run: hn worker pair ${possibleTarget} user@host`);
   }
 
@@ -304,8 +389,8 @@ async function main() {
     const worker = requireWorker(config, name);
     if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
     const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
-    persistWorkerMetadata(config, name, metadata);
-    printWorkerChecks(name, doctorWorker(metadata));
+    const saved = persistWorkerMetadata(config, name, metadata);
+    printWorkerChecks(name, doctorWorker(saved), saved.trust ?? "trusted");
     return;
   }
 
@@ -326,12 +411,28 @@ async function main() {
       addTarget(config, rest[0], rest[1]);
       return;
     }
+    if (sub === "trust") {
+      requireArgs(rest, 2, "hn worker trust <name> <trusted|remote>");
+      const trust = setWorkerTrust(config, rest[0], rest[1]);
+      console.log(`${normalizeName(rest[0], "target name")}  ${trust}`);
+      return;
+    }
+    if (sub === "default") {
+      requireArgs(rest, 1, "hn worker default <name>");
+      const name = normalizeName(rest[0], "target name");
+      setDefaultTarget(config, name);
+      console.log(`default ${name}`);
+      return;
+    }
+    if (sub === "remove") {
+      requireArgs(rest, 1, "hn worker remove <name>");
+      console.log(`removed ${removeWorker(config, rest[0])}`);
+      return;
+    }
     if (sub === "bootstrap") {
       requireArgs(rest, 1, "hn worker bootstrap <name>");
       const name = normalizeName(rest[0], "target name");
-      const worker = prepareTarget(config, name, { quiet: false });
-      config.workers[name] = worker;
-      saveConfig(config);
+      prepareTarget(config, name, { quiet: false });
       return;
     }
     if (sub === "doctor") {
@@ -340,21 +441,23 @@ async function main() {
       const worker = requireWorker(config, name);
       if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
       const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
-      persistWorkerMetadata(config, name, metadata);
-      printWorkerChecks(name, doctorWorker(metadata));
+      const saved = persistWorkerMetadata(config, name, metadata);
+      printWorkerChecks(name, doctorWorker(saved), saved.trust ?? "trusted");
       return;
     }
     if (sub === "list") {
       const entries = Object.entries(config.workers);
+      const activeName = resolveActiveTargetName(config);
       if (!entries.length) console.log("No targets configured.");
       for (const [name, worker] of entries) {
-        const active = config.activeTarget === name ? "*" : " ";
+        const active = activeName === name ? "*" : " ";
+        const fallback = config.activeTarget === name ? "d" : " ";
         const platform = worker.platform ? `${worker.platform}/${worker.arch ?? "?"}` : (worker.pending ? "pairing" : "unknown");
-        console.log(`${active} ${name}\t${platform}\t${worker.target}${worker.port !== 22 ? `:${worker.port}` : ""}`);
+        console.log(`${active}${fallback} ${name}\t${worker.trust ?? "trusted"}\t${platform}\t${worker.target}${worker.port !== 22 ? `:${worker.port}` : ""}`);
       }
       return;
     }
-    fail("Usage: hn worker <pair|finish|add|bootstrap|doctor|list> ...");
+    fail("Usage: hn worker <pair|finish|add|trust|default|remove|bootstrap|doctor|list> ...");
   }
 
   if (command === "workspace") {
@@ -371,19 +474,56 @@ async function main() {
       console.log(`${root.local} <-> ${root.remote}`);
       return;
     }
+    if (sub === "remove-root") {
+      requireArgs(rest, 2, "hn workspace remove-root <workspace> <local-path>");
+      console.log(`removed ${removeWorkspaceRoot(config, rest[0], rest[1])}`);
+      return;
+    }
+    if (sub === "remove") {
+      requireArgs(rest, 1, "hn workspace remove <workspace>");
+      console.log(`removed ${removeWorkspace(config, rest[0])}`);
+      return;
+    }
+    if (sub === "grant") {
+      requireArgs(rest, 2, "hn workspace grant <workspace> <target>");
+      const grant = grantWorkspaceTarget(config, rest[0], rest[1]);
+      console.log(`${grant.workspaceName} -> ${grant.targetName} granted`);
+      return;
+    }
+    if (sub === "revoke") {
+      requireArgs(rest, 2, "hn workspace revoke <workspace> <target>");
+      const grant = revokeWorkspaceTarget(config, rest[0], rest[1]);
+      console.log(`${grant.workspaceName} -> ${grant.targetName} revoked`);
+      return;
+    }
     if (sub === "list") {
       for (const [name, workspace] of Object.entries(config.workspaces)) {
         console.log(name);
         for (const root of workspace.roots ?? []) console.log(`  ${root.local} <-> ${root.remote}`);
+        if ((workspace.grants ?? []).length) console.log(`  remote grants: ${workspace.grants.join(", ")}`);
       }
       return;
     }
-    fail("Usage: hn workspace <create|add|list> ...");
+    fail("Usage: hn workspace <create|add|remove-root|remove|grant|revoke|list> ...");
   }
 
   if (command === "sync") {
-    if (args[0]) {
-      const workspaceName = normalizeName(args[0], "workspace name");
+    const [sub, ...rest] = args;
+    if (sub === "list") {
+      printRecords(listSyncSessions(), "No Handoff sync sessions.");
+      return;
+    }
+    if (sub === "stop") {
+      const context = tryFindContext(config, process.cwd());
+      const workspaceName = rest[0]
+        ? normalizeName(rest[0], "workspace name")
+        : context?.name;
+      if (!workspaceName) fail("Usage: hn sync stop <workspace>");
+      stopWorkspaceSync(config, workspaceName);
+      return;
+    }
+    if (sub) {
+      const workspaceName = normalizeName(sub, "workspace name");
       syncWholeWorkspace(config, workspaceName, requireWorkspace(config, workspaceName));
     } else {
       const context = currentContext(config);
@@ -395,8 +535,15 @@ async function main() {
   if (command === "sessions") {
     const target = targetFor(config);
     const worker = prepareTarget(config, target.name);
+    if (args[0] === "kill") {
+      requireArgs(args.slice(1), 1, "hn sessions kill <session>");
+      killSession(worker, args[1]);
+      console.log(`killed ${args[1]}`);
+      return;
+    }
+    if (args.length && args[0] !== "list") fail("Usage: hn sessions [list|kill <session>]");
     const result = listSessions(worker);
-    process.stdout.write(result.stdout || "No Zellij sessions.\n");
+    process.stdout.write(result.stdout || "No Handoff sessions.\n");
     return;
   }
 
@@ -409,9 +556,20 @@ async function main() {
   }
 
   if (command === "port") {
+    if (args[0] === "list") {
+      printRecords(listForwards(), "No Handoff port forwards.");
+      return;
+    }
+    if (args[0] === "stop") {
+      requireArgs(args.slice(1), 1, "hn port stop <forward-name-or-id>");
+      const stopped = stopForward(args[1]);
+      console.log(`stopped ${stopped.name}`);
+      return;
+    }
     requireArgs(args, 1, "hn port <remote-port> [local-port]");
     const context = currentContext(config);
     const worker = prepareTarget(config, context.targetName);
+    requireWorkspacePermission({ ...context, worker });
     const remotePort = Number(args[0]);
     const localPort = args[1] ? Number(args[1]) : remotePort;
     if (![remotePort, localPort].every((port) => Number.isInteger(port) && port >= 1 && port <= 65535)) {

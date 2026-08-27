@@ -12,7 +12,8 @@
   },
   "scripts": {
     "check": "node src/index.js --help && node src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:integration": "node --test test/integration/*.test.js"
   },
   "license": "MIT"
 }
