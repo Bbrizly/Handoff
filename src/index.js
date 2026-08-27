@@ -12,7 +12,7 @@ import {
   updateConfig,
 } from "./config.js";
 import { additionalWorkspaceDirs, augmentAgentCommand } from "./agent.js";
-import { targetAliasInvocation } from "./cli-routing.js";
+import { isPersistFlag, parseModeArgs, parseTargetInvocation } from "./cli-routing.js";
 import { ensureControllerSshKey, windowsPairCommand } from "./pair.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
 import {
@@ -29,7 +29,13 @@ import {
   workspaceAllowsTarget,
   workspaceRootsForTarget,
 } from "./workspace.js";
-import { bootstrapWorker, detectWorker, doctorWorker, ensureRemoteDirectories } from "./worker.js";
+import {
+  bootstrapWorker,
+  detectWorker,
+  doctorWorker,
+  ensureRemoteDirectories,
+  prepareWorkerCore,
+} from "./worker.js";
 import {
   ensureForward,
   ensureSyncRoot,
@@ -78,8 +84,9 @@ Everyday:
   HN_TARGET=pc hn claude     explicit environment override
   hn claude                  direct interactive Claude on the selected target
   hn shell                   open the selected target's mapped remote shell
-  hn session claude          optional persistent Zellij session
-  hn session                 optional persistent Zellij shell
+  hn pc -p                   same compute, persistent desk that survives closing this
+  hn pc -p claude            persistent desk, running Claude
+  hn -p                      persistent desk on the selected target
   hn exec npm test           one-shot remote command
   hn port 5173               remote 5173 -> local 5173
 
@@ -146,10 +153,12 @@ function persistWorkerMetadata(config, name, worker) {
   return config.workers[name] ?? worker;
 }
 
-function prepareTarget(config, name, { quiet = true } = {}) {
+function prepareTarget(config, name, { quiet = true, persistence = false } = {}) {
   const worker = requireWorker(config, name);
   if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
-  const prepared = bootstrapWorker(worker, { quiet });
+  const prepared = persistence
+    ? bootstrapWorker(worker, { quiet })
+    : prepareWorkerCore(worker, { quiet });
   return persistWorkerMetadata(config, name, prepared);
 }
 
@@ -247,9 +256,11 @@ function printStatus(config, workspaceName = undefined) {
 
 function printWorkerChecks(name, checks, trust) {
   console.log(`${name}  ${checks.platform}/${checks.arch}  ${trust}`);
-  for (const key of ["ssh", "zellij", "claude", "codex", "node"]) {
+  for (const key of ["ssh", "claude", "codex", "node"]) {
     console.log(`  ${checks[key] ? "✓" : "✗"} ${key}`);
   }
+  // Persistence is optional. Missing is not unhealthy, it just means no '-p' yet.
+  console.log(checks.zellij ? "  ✓ persistence" : "  — persistence  (installs on first 'hn <target> -p')");
   console.log(`  ${isSyncBackendInstalled() ? "✓" : "✗"} mutagen (controller)`);
 }
 
@@ -289,7 +300,7 @@ function finishTarget(config, nameInput) {
 
   const detected = { ...worker, ...detectWorker(worker) };
   delete detected.pending;
-  const prepared = bootstrapWorker(detected, { quiet: true });
+  const prepared = prepareWorkerCore(detected, { quiet: true });
   updateConfig(config, (latest) => {
     const current = requireWorker(latest, name);
     latest.workers[name] = { ...current, ...prepared, pending: undefined };
@@ -307,7 +318,7 @@ function addTarget(config, nameInput, targetInput) {
     fail(`SSH is not working for ${targetInput}. For a new Windows worker use: hn worker pair ${name} ${targetInput}`);
   }
   const worker = { ...base, ...detectWorker(base), trust: "remote" };
-  const prepared = bootstrapWorker(worker, { quiet: true });
+  const prepared = prepareWorkerCore(worker, { quiet: true });
   addWorker(config, name, prepared);
   console.log(`${name} ✓  ${prepared.platform}/${prepared.arch}  ${prepared.target}${prepared.port !== 22 ? `:${prepared.port}` : ""}  remote`);
   console.log(`grant a workspace explicitly before first sync: hn workspace grant <workspace> ${name}`);
@@ -352,9 +363,10 @@ function stopWorkspaceSync(config, workspaceName) {
   console.log(stopped ? `stopped ${stopped} sync session${stopped === 1 ? "" : "s"}` : "No active Handoff syncs for that workspace/target.");
 }
 
-function runPersistent(config, commandArgs, { unique = false, preparedWorker = null } = {}) {
+function runPersistent(config, commandArgs, { unique = false, preparedWorker = null, targetName = null } = {}) {
   let context = currentContext(config);
-  const worker = preparedWorker ?? prepareTarget(config, context.targetName);
+  if (targetName) context = { ...context, targetName, worker: requireWorker(config, targetName) };
+  const worker = preparedWorker ?? prepareTarget(config, context.targetName, { persistence: true });
   context = { ...context, worker };
   ensureWorkspaceSync(context);
 
@@ -370,6 +382,16 @@ function runPersistent(config, commandArgs, { unique = false, preparedWorker = n
   );
   ensurePersistentCommand(worker, sessionName, remoteCwd, remoteArgs);
   attachSession(worker, sessionName);
+}
+
+// Persistent mode is opt-in and installs the persistence runtime on first use.
+// The backend behind it is still Zellij; swapping it does not change this call.
+function runPersistentDesk(config, targetName, commandArgs = []) {
+  const worker = prepareTarget(config, targetName, { persistence: true });
+  runPersistent(config, commandArgs.length ? commandArgs : shellCommand(worker), {
+    targetName,
+    preparedWorker: worker,
+  });
 }
 
 function runInteractive(config, targetName, commandArgs = [], { preparedWorker = null } = {}) {
@@ -409,13 +431,23 @@ async function main() {
     argv = argv.slice(2);
   }
 
+  if (isPersistFlag(argv[0])) {
+    const { commandArgs } = parseModeArgs(argv);
+    runPersistentDesk(config, targetFor(config).name, commandArgs);
+    return;
+  }
+
   let [command, ...args] = argv;
   const possibleTarget = String(command).toLowerCase();
   const targetInvocation = RESERVED_COMMANDS.has(possibleTarget)
     ? null
-    : targetAliasInvocation(config, command, args);
+    : parseTargetInvocation(config, command, args);
   if (targetInvocation) {
-    runInteractive(config, targetInvocation.targetName, targetInvocation.commandArgs);
+    if (targetInvocation.mode === "persistent") {
+      runPersistentDesk(config, targetInvocation.targetName, targetInvocation.commandArgs);
+    } else {
+      runInteractive(config, targetInvocation.targetName, targetInvocation.commandArgs);
+    }
     return;
   } else if (TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
     fail(`Target '${possibleTarget}' is not configured. Run: hn worker pair ${possibleTarget} user@host`);
@@ -557,7 +589,7 @@ async function main() {
     if (sub === "bootstrap") {
       requireArgs(rest, 1, "hn worker bootstrap <name>");
       const name = normalizeName(rest[0], "target name");
-      prepareTarget(config, name, { quiet: false });
+      prepareTarget(config, name, { quiet: false, persistence: true });
       return;
     }
     if (sub === "doctor") {
@@ -664,7 +696,7 @@ async function main() {
 
   if (command === "sessions") {
     const target = targetFor(config);
-    const worker = prepareTarget(config, target.name);
+    const worker = prepareTarget(config, target.name, { persistence: true });
     if (args[0] === "kill") {
       requireArgs(args.slice(1), 1, "hn sessions kill <session>");
       killSession(worker, args[1]);
@@ -680,7 +712,7 @@ async function main() {
   if (command === "attach") {
     requireArgs(args, 1, "hn attach <session>");
     const target = targetFor(config);
-    const worker = prepareTarget(config, target.name);
+    const worker = prepareTarget(config, target.name, { persistence: true });
     attachSession(worker, args[0]);
     return;
   }
@@ -731,7 +763,7 @@ async function main() {
     const unique = args[0] === "new";
     const sessionArgs = unique ? args.slice(1) : args;
     const context = currentContext(config);
-    const worker = prepareTarget(config, context.targetName);
+    const worker = prepareTarget(config, context.targetName, { persistence: true });
     runPersistent(
       config,
       sessionArgs.length ? sessionArgs : shellCommand(worker),

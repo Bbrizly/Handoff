@@ -197,11 +197,18 @@ export function ensureRemoteDirectory(worker, remotePath) {
   ensureRemoteDirectories(worker, [remotePath]);
 }
 
-export function bootstrapWorker(worker, { quiet = false } = {}) {
+// Reaching a worker must never install a persistence runtime. A plain
+// 'hn pc' pays for SSH and platform detection, nothing else.
+export function prepareWorkerCore(worker, { quiet = false } = {}) {
   const ssh = testSsh(worker);
   if (ssh.code !== 0) fail(`Cannot SSH to ${worker.target}. ${(ssh.stderr || ssh.stdout).trim()}`);
 
   const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
+  if (!quiet) console.log(`ready  ${metadata.platform}/${metadata.arch}`);
+  return metadata;
+}
+
+export function ensurePersistenceRuntime(metadata, { quiet = false } = {}) {
   const current = zellijVersion(metadata);
   if (current.code === 0 && current.stdout.includes(ZELLIJ_VERSION)) {
     if (!quiet) console.log(`ready  ${metadata.platform}/${metadata.arch} · Zellij ${ZELLIJ_VERSION}`);
@@ -227,6 +234,10 @@ export function bootstrapWorker(worker, { quiet = false } = {}) {
   }
   if (!quiet) console.log(`ready  ${metadata.platform}/${metadata.arch} · Zellij ${ZELLIJ_VERSION}`);
   return metadata;
+}
+
+export function bootstrapWorker(worker, { quiet = false } = {}) {
+  return ensurePersistenceRuntime(prepareWorkerCore(worker, { quiet: true }), { quiet });
 }
 
 export function doctorWorker(worker) {
