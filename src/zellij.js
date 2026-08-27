@@ -182,7 +182,7 @@ function diagnosticText(result) {
 }
 
 export function killSession(worker, sessionName) {
-  runZellij(worker, ["kill-sessions", sessionName], { capture: true, allowFailure: true });
+  runZellij(worker, ["kill-session", sessionName], { capture: true, allowFailure: true });
 }
 
 function windowsZellijLaunchLog(worker, sessionName) {
