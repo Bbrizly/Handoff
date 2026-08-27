@@ -39,15 +39,18 @@ $z = ${zellijPowerShellExpression()}
 $logDir = Join-Path $HOME '.hn\\logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = Join-Path $logDir ${quotePowerShell(`zellij-create-${safeSession}.log`)}
+("starting Windows Zellij anchor at {0:o}" -f (Get-Date)) | Out-File -FilePath $logFile -Encoding utf8
 try {
-  $hnOutput = & $z attach --create-background ${quotePowerShell(sessionName)} 2>&1
+  # On native Windows, --create-background can return successfully while its
+  # server disappears as the launcher exits. Keep one hidden attached client
+  # alive instead; it anchors the Zellij server independently of OpenSSH.
+  & $z attach --create ${quotePowerShell(sessionName)}
   $hnCode = $LASTEXITCODE
-  $hnOutput | Out-File -FilePath $logFile -Encoding utf8
+  ("anchor exited with code {0} at {1:o}" -f $hnCode, (Get-Date)) | Add-Content -Path $logFile -Encoding utf8
 } catch {
-  $_ | Out-String | Out-File -FilePath $logFile -Encoding utf8
+  $_ | Out-String | Add-Content -Path $logFile -Encoding utf8
   $hnCode = 1
 }
-Start-Sleep -Milliseconds 800
 exit $hnCode
 `;
   const encoded = encodePowerShell(childScript);
@@ -57,12 +60,14 @@ $ErrorActionPreference = 'Stop'
 $hnEnvironment = @(Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" })
 $startup = New-CimInstance -CimClass (Get-CimClass -ClassName Win32_ProcessStartup) -ClientOnly
 # Windows OpenSSH can tear down descendants when an exec channel closes. Spawn
-# the Zellij creator through WMI and explicitly request CREATE_BREAKAWAY_FROM_JOB.
-$startup.CreateFlags = [uint32]16777216
+# a long-lived Zellij anchor through WMI, explicitly escaping the sshd job and
+# giving Zellij a real Windows console while keeping that console hidden.
+# CREATE_BREAKAWAY_FROM_JOB (0x01000000) | CREATE_NEW_CONSOLE (0x00000010)
+$startup.CreateFlags = [uint32]16777232
 $startup.ShowWindow = [uint16]0
 $startup.EnvironmentVariables = [string[]]$hnEnvironment
 $childPowerShell = Join-Path $PSHOME 'powershell.exe'
-$commandLine = '"' + $childPowerShell + '" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}'
+$commandLine = '"' + $childPowerShell + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}'
 $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
   CommandLine = $commandLine
   CurrentDirectory = $HOME
@@ -71,16 +76,17 @@ $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Argumen
 if ($created.ReturnValue -ne 0) {
   throw "Win32_Process.Create failed with return value $($created.ReturnValue)."
 }
-Start-Sleep -Milliseconds 120
+Start-Sleep -Milliseconds 150
 $spawned = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($created.ProcessId)" -ErrorAction SilentlyContinue
-if ($spawned) {
-  $owner = Invoke-CimMethod -InputObject $spawned -MethodName GetOwner -ErrorAction SilentlyContinue
-  if ($owner -and $owner.ReturnValue -eq 0 -and $owner.User -and $owner.User -ine $env:USERNAME) {
-    try { Invoke-CimMethod -InputObject $spawned -MethodName Terminate -Arguments @{ Reason = 1 } | Out-Null } catch {}
-    throw "Detached Zellij launcher ran as '$($owner.User)' instead of '$env:USERNAME'."
-  }
+if (-not $spawned) {
+  throw "Detached Zellij anchor exited before Handoff could verify it."
 }
-Write-Output ("hn-zellij-launch:{0}" -f $created.ProcessId)
+$owner = Invoke-CimMethod -InputObject $spawned -MethodName GetOwner -ErrorAction SilentlyContinue
+if ($owner -and $owner.ReturnValue -eq 0 -and $owner.User -and $owner.User -ine $env:USERNAME) {
+  try { Invoke-CimMethod -InputObject $spawned -MethodName Terminate -Arguments @{ Reason = 1 } | Out-Null } catch {}
+  throw "Detached Zellij launcher ran as '$($owner.User)' instead of '$env:USERNAME'."
+}
+Write-Output ("hn-zellij-anchor:{0}" -f $created.ProcessId)
 `;
 }
 
