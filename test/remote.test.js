@@ -22,6 +22,8 @@ test("interactive Windows shell stays open in the mapped remote directory", () =
   assert.match(script, /Set-Alias/);
   assert.match(script, /-CommandType Application/);
   assert.match(script, /claude.*codex.*cursor/s);
+  assert.match(script, /\.hn\\bin/);
+  assert.match(script, /\$env:Path/);
 });
 
 test("interactive Windows command runs directly with PTY-capable PowerShell", () => {
@@ -34,6 +36,8 @@ test("interactive Windows command runs directly with PTY-capable PowerShell", ()
   assert.match(script, /Get-Command/);
   assert.match(script, /'claude'/);
   assert.match(script, /'--version'/);
+  assert.match(script, /\.hn\\bin/);
+  assert.match(script, /\$env:Path/);
 });
 
 test("interactive POSIX shell and direct command preserve the mapped cwd", () => {
@@ -42,6 +46,9 @@ test("interactive POSIX shell and direct command preserve the mapped cwd", () =>
   const command = remote.interactivePosixScript("hn/main/GitHub/Handoff", ["npm", "run", "dev"]);
 
   assert.match(shell, /cd --/);
+  assert.match(shell, /\.hn\/bin/);
+  assert.match(shell, /PATH/);
   assert.match(shell, /exec \"\$\{SHELL:-sh\}\" -l/);
+  assert.match(command, /\.hn\/bin/);
   assert.match(command, /exec 'npm' 'run' 'dev'/);
 });

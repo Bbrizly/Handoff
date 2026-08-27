@@ -4,12 +4,24 @@ import { quotePosix, quotePowerShell } from "./util.js";
 
 function posixCwdSetup(remoteCwd) {
   return `
+PATH="$HOME/.hn/bin:$PATH"
+export PATH
 hn_cwd=${quotePosix(remoteCwd)}
 case "$hn_cwd" in
   /*) ;;
   *) hn_cwd="$HOME/$hn_cwd" ;;
 esac
 cd -- "$hn_cwd"
+`;
+}
+
+function windowsManagedToolSetup() {
+  return `
+$hnBin = Join-Path $HOME '.hn\\bin'
+if (Test-Path -LiteralPath $hnBin -PathType Container) {
+  $env:Path = "$hnBin$([IO.Path]::PathSeparator)$env:Path"
+}
+Remove-Variable hnBin -ErrorAction SilentlyContinue
 `;
 }
 
@@ -45,8 +57,8 @@ Remove-Variable hnCommandName, hnResolvedCommand, hnApplication -ErrorAction Sil
 
 export function interactivePowerShellArgs(remoteCwd, commandArgs = []) {
   const script = commandArgs.length
-    ? `$ErrorActionPreference = 'Stop'\nSet-Location ${remotePathExpression(remoteCwd)}\n${windowsInvocation(commandArgs[0], commandArgs.slice(1))}`
-    : `${windowsInteractiveShellSetup()}\nSet-Location ${remotePathExpression(remoteCwd)}`;
+    ? `$ErrorActionPreference = 'Stop'\n${windowsManagedToolSetup()}\nSet-Location ${remotePathExpression(remoteCwd)}\n${windowsInvocation(commandArgs[0], commandArgs.slice(1))}`
+    : `${windowsManagedToolSetup()}\n${windowsInteractiveShellSetup()}\nSet-Location ${remotePathExpression(remoteCwd)}`;
   return [
     "powershell.exe",
     "-NoLogo",
@@ -75,6 +87,7 @@ export function runRemoteCommand(worker, remoteCwd, commandArgs) {
     const [command, ...args] = commandArgs;
     const script = `
 $ErrorActionPreference = 'Stop'
+${windowsManagedToolSetup()}
 Set-Location ${remotePathExpression(remoteCwd)}
 ${windowsInvocation(command, args)}
 `;
