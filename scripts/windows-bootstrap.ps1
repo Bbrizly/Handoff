@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -20,11 +21,17 @@ Set-Service -Name sshd -StartupType Automatic
 Start-Service sshd
 
 $authorizedFile = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
-New-Item -ItemType File -Path $authorizedFile -Force | Out-Null
-$existing = Get-Content -Path $authorizedFile -ErrorAction SilentlyContinue
-if ($existing -notcontains $PublicKey) {
-  Add-Content -Path $authorizedFile -Value $PublicKey
+if (-not (Test-Path -LiteralPath $authorizedFile)) {
+  New-Item -ItemType File -Path $authorizedFile | Out-Null
 }
+
+$normalizedKey = $PublicKey.Trim()
+$existing = @(Get-Content -LiteralPath $authorizedFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() })
+if ($existing -notcontains $normalizedKey) {
+  Add-Content -LiteralPath $authorizedFile -Value $normalizedKey
+}
+
+# Windows OpenSSH requires this file to be readable only by Administrators and SYSTEM.
 icacls.exe $authorizedFile /inheritance:r /grant '*S-1-5-32-544:F' /grant 'SYSTEM:F' | Out-Null
 
 Restart-Service sshd
