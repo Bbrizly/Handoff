@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   checksumForAsset,
+  legacySyncSessionName,
   mutagenEndpoint,
   mutagenReleaseAsset,
   parseSessionRecords,
@@ -30,6 +31,15 @@ test("sync session identity changes when target changes", () => {
   const pcName = syncSessionName("main", "pc", pc, root);
   const awsName = syncSessionName("main", "aws", aws, root);
   assert.notEqual(pcName, awsName);
+});
+
+test("sync policy v2 gets a versioned session name and can identify v1", () => {
+  const pc = { user: "me", host: "pc", target: "me@pc", port: 22 };
+  const current = syncSessionName("main", "pc", pc, root);
+  const legacy = legacySyncSessionName("main", "pc", pc, root);
+  assert.match(current, /^hn-sync-v2-/);
+  assert.match(legacy, /^hn-sync-/);
+  assert.notEqual(current, legacy);
 });
 
 test("session records parse one real line per Mutagen session", () => {
