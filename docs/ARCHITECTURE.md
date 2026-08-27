@@ -409,8 +409,9 @@ The generated PowerShell bootstrap:
 - verifies key-based SSH;
 - detects platform and architecture;
 - removes pending-pair state;
-- bootstraps Handoff's Zellij binary;
 - saves worker metadata.
+
+Pairing does not install the persistence runtime. That happens the first time the user runs `-p`, `hn session`, or the explicit `hn worker bootstrap`.
 
 Current limitation: the bootstrap assumes the paired Windows account is an administrator.
 
@@ -436,6 +437,8 @@ On POSIX, Handoff enters the user's login shell. Direct forms such as `hn pc cla
 ### 12.2 Why Zellij remains available
 
 Zellij remains the optional persistent session backend because it is cross-platform and has native Windows support. tmux and mandatory WSL remain rejected. Core Handoff does not depend on this backend.
+
+The dependency is now enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; `ensurePersistenceRuntime()` installs the multiplexer and is only reached from persistent commands. `hn doctor` reports a missing runtime as `— persistence`, not a failure.
 
 Pinned version:
 

@@ -902,3 +902,39 @@ Direct commands such as `hn pc claude` already augmented Claude and Codex with t
 The Windows shell bootstrap now defines process-local wrappers around the resolved native Claude and Codex applications. They add every non-profile workspace root with the applications' supported `--add-dir` arguments and pass management commands through unchanged. The wrappers do not modify the PowerShell profile or replace installed tools.
 
 The reference Lenovo proved both wrappers resolve as functions over the real applications, Claude opens in the mapped project, and the synchronized skills are discoverable. Equivalent transparent wrapping on POSIX interactive shells remains later portability work; direct POSIX agent forms already receive the additional roots.
+
+---
+
+## HN-065 — Persistence is optional and installs nothing until it is asked for
+
+**Status:** Accepted
+
+`prepareTarget()` called `bootstrapWorker()`, which verified or installed Zellij on every ordinary command. A plain `hn pc` paid for a multiplexer it never used, and pairing a worker downloaded one before the user had asked for a session.
+
+The bootstrap is now two steps:
+
+- `prepareWorkerCore()` proves SSH, detects platform/architecture, and stops there. Every ordinary command uses it.
+- `ensurePersistenceRuntime()` installs the pinned persistence runtime. Only `-p`, `hn session`, `hn sessions`, `hn attach`, and the explicit `hn worker bootstrap` reach it.
+
+`hn doctor` reports a missing runtime as `— persistence`, not `✗`. An optional capability that was never requested is not an unhealthy system.
+
+The transparent terminal must never depend on the persistence layer. If the persistence runtime is completely broken, `hn pc` still has to work.
+
+---
+
+## HN-066 — `-p`, `--p`, and `--persist` are one flag, and only before the remote command
+
+**Status:** Accepted
+
+Target aliases forwarded everything after the target as the remote command, so `hn pc --persist` meant "run a program called `--persist`".
+
+`parseTargetInvocation()` now reads Handoff flags only while they sit in front of the remote command. All three spellings resolve to the same mode; `--persist` is the documented form, `-p` is the fast one, and `--p` is accepted because refusing it helps nobody.
+
+```bash
+hn pc -p                        # persistent
+hn pc -p claude                 # persistent, running Claude
+hn pc npm run dev -- --persist  # --persist belongs to npm
+hn pc -p -- foo --persist       # one flag consumed, the rest is the command
+```
+
+A bare `hn -p` uses the selected target.

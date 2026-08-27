@@ -308,6 +308,33 @@ Only after the core path is boring:
 
 ---
 
+## Phase 11 — Persistent multi-project desk
+
+**Status:** Core decoupled and flags parsed; the desk itself is not built
+
+`hn pc` is a disposable transparent terminal. `hn pc -p` should be the same compute inside a persistent desk: one runtime per target/workspace, one workspace per project, a sidebar listing projects and agents, and a state per agent so the one that needs the user is visible.
+
+Done:
+
+- ordinary commands no longer install a persistence runtime;
+- `-p` / `--p` / `--persist` parse ahead of the remote command;
+- `hn doctor` treats a missing runtime as optional, not broken.
+
+Remaining:
+
+- replace the command-session backend with a project/agent backend;
+- one runtime per controller + target + workspace, keyed by a stable controller id;
+- one runtime workspace per Git project, matched on the mapped remote root, not the label;
+- agent state (blocked, done, working, idle) rolled up per project;
+- reboot recovery: layout and cwd restored, agent conversations resumed where the agent supports it, arbitrary processes not resurrected;
+- retire `hn new`, `hn attach`, and raw session names from the public surface.
+
+Terminal history must not persist across a worker restart by default. Saved screen contents can hold tokens and prompts.
+
+The merge gate is the reference Lenovo, not CI: two projects live at once, an agent in each, close the Mac terminal, come back, and find the same processes.
+
+---
+
 ## Definition of v1
 
 Handoff v1 is ready when this feels normal:

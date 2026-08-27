@@ -475,3 +475,18 @@ conflicts: 1
 This is valuable product evidence: Handoff's safety gate correctly prevented starting remote Claude while the workspace was not clean.
 
 The next step is not to disable the gate; it is to improve ignores and problem-resolution UX until a normal workspace stays healthy.
+
+---
+
+## 18. Persistent mode is wired but the desk behind it does not exist yet
+
+`hn pc -p` parses, installs the persistence runtime on demand, and opens a session. Behind it is still the old command-session backend: one session per command, no project sidebar, no agent state, no multi-project switching.
+
+Missing:
+
+- one runtime per controller + target + workspace;
+- one runtime workspace per Git project;
+- blocked/done/working/idle state per agent;
+- reboot recovery.
+
+Also unobserved: the claim that an ordinary `hn pc` installs no persistence runtime is true by construction (one call site, guarded by `persistence: true`) but has not been watched on a worker that has never had one. The reference Lenovo already had Zellij installed before the split, so it cannot show the difference.

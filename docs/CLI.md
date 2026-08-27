@@ -25,6 +25,9 @@ hn exec npm test
 hn port 5173
 hn port 3000 3001
 
+hn pc -p
+hn -p
+
 hn sessions
 hn attach <session>
 hn doctor
@@ -96,6 +99,29 @@ hn aws claude
 This enters the mapped cwd and runs Claude directly with the PTY. It does not change the selected target or create a managed Zellij session.
 
 Target aliases are arbitrary configured names. `pc`, `home`, and `aws` are ergonomic examples/hints, not special backend types.
+
+### Persistent mode
+
+```bash
+hn pc -p
+hn pc --p
+hn pc --persist
+hn pc -p claude
+hn -p
+```
+
+Same target, same synchronization, same mapped project. The difference is that the work survives closing the terminal, and `hn pc -p` returns to it.
+
+`--persist` is the clearest spelling, `-p` is the fastest, and `--p` is accepted. All three mean the same thing.
+
+Handoff reads these flags only while they sit in front of the remote command:
+
+```bash
+hn pc npm run dev -- --persist   # --persist goes to npm
+hn pc -p -- foo --persist        # one flag consumed, the rest is the command
+```
+
+Persistent mode is the only thing that installs a persistence runtime on a worker. A plain `hn pc` never does.
 
 ## 4. Direct interactive commands
 
@@ -403,12 +429,14 @@ Current checks:
 ```text
 pc  windows/x64
   ✓ ssh
-  ✓ zellij
   ✓ claude
   ✓ codex
   ✓ node
+  ✓ persistence
   ✓ mutagen (controller)
 ```
+
+A worker that has never been used with `-p` reports `— persistence` instead. An optional capability nobody asked for is not a failure.
 
 Future useful checks:
 
@@ -496,6 +524,8 @@ A target alias cannot use a reserved command name.
 - ordinary commands run directly and interactively; persistence is explicit.
 - `hn exec` remains explicitly one-shot.
 - `hn session` is the optional managed persistence surface.
+- `-p`, `--p`, and `--persist` are the same flag, and Handoff reads them only before the remote command begins.
+- ordinary commands never install a persistence runtime.
 - `hn sync` means the whole configured workspace, not only the current project.
 - conflicts stop execution.
 - personal profile sharing is opt-in, trusted-target only, and reversible.

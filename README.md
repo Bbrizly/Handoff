@@ -28,7 +28,7 @@ When changing the product architecture, update the decision ledger instead of re
 
 The controller needs Node 20+ and SSH/SCP. On first sync, `hn` downloads the pinned official Mutagen v0.18.1 release directly from GitHub, verifies it against the release's SHA256SUMS, and keeps the binary plus its agent bundle under `~/.hn/bin`. Homebrew is not required for Mutagen.
 
-A worker needs the tools you actually want to run there (Claude, Codex, Node, Python, etc.). `hn` manages SSH pairing and injects a pinned, checksum-verified Zellij binary. Windows does not need WSL or a manual Zellij install.
+A worker needs the tools you actually want to run there (Claude, Codex, Node, Python, etc.). `hn` manages SSH pairing and nothing else until you ask for more. The pinned, checksum-verified persistence runtime is only installed the first time you use `-p`. Windows does not need WSL or a manual install.
 
 ```bash
 git clone https://github.com/Bbrizly/Handoff.git
@@ -157,13 +157,19 @@ docker compose up
 zellij
 ```
 
-Direct local forms such as `hn pc claude` use the same mapped PTY without creating a hidden session. Optional managed persistence remains available behind `hn session` and `SessionBackend`:
+Direct local forms such as `hn pc claude` use the same mapped PTY without creating a hidden session. That terminal is disposable: close it and the remote command goes with it.
+
+Add `-p` when you want the work to stay:
 
 ```bash
-hn session
-hn session claude
-hn session new claude
+hn pc -p          # same compute, persistent
+hn pc -p claude
+hn -p             # selected target
 ```
+
+`--p` and `--persist` mean the same thing. Handoff reads the flag only before the remote command, so `hn pc npm run dev -- --persist` still passes `--persist` to npm.
+
+Nothing installs a persistence runtime until the first `-p`.
 
 Other useful commands:
 
