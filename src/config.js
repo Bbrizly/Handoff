@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -16,7 +17,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fail } from "./util.js";
 
-const CONFIG_VERSION = 4;
+const CONFIG_VERSION = 5;
 const HN_DIR = join(homedir(), ".hn");
 const CONFIG_PATH = join(HN_DIR, "config.json");
 const CONFIG_BACKUP_PATH = join(HN_DIR, "config.backup.json");
@@ -70,8 +71,15 @@ export function normalizeConfig(input = {}) {
     ? requestedActive
     : (Object.keys(workers)[0] ?? null);
 
+  // Identifies this controller so two laptops sharing a worker do not attach to
+  // each other's persistent desk. Generated once, never regenerated.
+  const controllerId = typeof raw.controllerId === "string" && /^[0-9a-f]{32}$/.test(raw.controllerId)
+    ? raw.controllerId
+    : randomBytes(16).toString("hex");
+
   return {
     version: CONFIG_VERSION,
+    controllerId,
     activeTarget,
     workers,
     workspaces,

@@ -50,6 +50,16 @@ import {
 } from "./sync.js";
 import { findContext, mapLocalToRemote, tryFindContext } from "./resolve.js";
 import {
+  HERDR_VERSION,
+  attachHerdr,
+  ensureHerdrInstalled,
+  ensureHerdrProject,
+  ensureHerdrServer,
+  herdrRuntimeName,
+  herdrVersion,
+  runInHerdrProject,
+} from "./herdr.js";
+import {
   attachSession,
   ensurePersistentCommand,
   killSession,
@@ -254,13 +264,21 @@ function printStatus(config, workspaceName = undefined) {
   }
 }
 
+function workerChecks(worker) {
+  const checks = doctorWorker(worker);
+  checks.persistence = checks.ssh && herdrVersion(worker).includes(HERDR_VERSION);
+  return checks;
+}
+
 function printWorkerChecks(name, checks, trust) {
   console.log(`${name}  ${checks.platform}/${checks.arch}  ${trust}`);
   for (const key of ["ssh", "claude", "codex", "node"]) {
     console.log(`  ${checks[key] ? "✓" : "✗"} ${key}`);
   }
   // Persistence is optional. Missing is not unhealthy, it just means no '-p' yet.
-  console.log(checks.zellij ? "  ✓ persistence" : "  — persistence  (installs on first 'hn <target> -p')");
+  console.log(checks.persistence
+    ? `  ✓ persistence  (Herdr ${HERDR_VERSION})`
+    : "  — persistence  (installs on first 'hn <target> -p')");
   console.log(`  ${isSyncBackendInstalled() ? "✓" : "✗"} mutagen (controller)`);
 }
 
@@ -384,14 +402,29 @@ function runPersistent(config, commandArgs, { unique = false, preparedWorker = n
   attachSession(worker, sessionName);
 }
 
-// Persistent mode is opt-in and installs the persistence runtime on first use.
-// The backend behind it is still Zellij; swapping it does not change this call.
+// Persistent mode: one desk per controller + workspace on the target, one
+// project per synchronized Git project. The runtime installs on first use.
 function runPersistentDesk(config, targetName, commandArgs = []) {
-  const worker = prepareTarget(config, targetName, { persistence: true });
-  runPersistent(config, commandArgs.length ? commandArgs : shellCommand(worker), {
-    targetName,
-    preparedWorker: worker,
+  let context = findContext(config, process.cwd());
+  const worker = prepareTarget(config, targetName);
+  context = { ...context, targetName, worker };
+  ensureWorkspaceSync(context);
+
+  ensureHerdrInstalled(worker, { quiet: false });
+  const runtime = herdrRuntimeName(config.controllerId, context.name);
+  ensureHerdrServer(worker, runtime);
+
+  // Project-scoped, not cwd-scoped. An existing desk keeps the directory it has.
+  const remoteRoot = mapLocalToRemote(context.root, context.projectLocal);
+  const project = ensureHerdrProject(worker, runtime, {
+    remoteRoot,
+    name: basename(context.projectLocal),
   });
+  if (project.created) {
+    console.log(`desk ready. click a project or agent in the sidebar; 'hn ${targetName} -p' comes back here`);
+  }
+  if (commandArgs.length) runInHerdrProject(worker, runtime, project.workspaceId, commandArgs);
+  attachHerdr(worker, runtime);
 }
 
 function runInteractive(config, targetName, commandArgs = [], { preparedWorker = null } = {}) {
@@ -547,7 +580,7 @@ async function main() {
     if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
     const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
     const saved = persistWorkerMetadata(config, name, metadata);
-    printWorkerChecks(name, doctorWorker(saved), saved.trust ?? "trusted");
+    printWorkerChecks(name, workerChecks(saved), saved.trust ?? "trusted");
     return;
   }
 
@@ -589,7 +622,9 @@ async function main() {
     if (sub === "bootstrap") {
       requireArgs(rest, 1, "hn worker bootstrap <name>");
       const name = normalizeName(rest[0], "target name");
-      prepareTarget(config, name, { quiet: false, persistence: true });
+      const bootstrapped = prepareTarget(config, name, { quiet: false });
+      ensureHerdrInstalled(bootstrapped, { quiet: false });
+      console.log(`persistence ✓  Herdr ${HERDR_VERSION}`);
       return;
     }
     if (sub === "doctor") {
@@ -599,7 +634,7 @@ async function main() {
       if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
       const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
       const saved = persistWorkerMetadata(config, name, metadata);
-      printWorkerChecks(name, doctorWorker(saved), saved.trust ?? "trusted");
+      printWorkerChecks(name, workerChecks(saved), saved.trust ?? "trusted");
       return;
     }
     if (sub === "list") {
