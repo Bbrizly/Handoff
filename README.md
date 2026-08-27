@@ -11,6 +11,19 @@ hn + Mutagen  ---------------------> Claude / Codex / builds
 localhost       <------------------- dev servers
 ```
 
+## Product docs
+
+The canonical product and engineering specification lives in [`docs/`](./docs/README.md):
+
+- [`docs/PRD.md`](./docs/PRD.md) — what Handoff is, requirements, scope, non-goals, and success criteria.
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — controller/worker, sync, Git, sessions, Windows, networking, and security architecture.
+- [`docs/DECISIONS.md`](./docs/DECISIONS.md) — accepted, rejected, deferred, and still-unproven design decisions.
+- [`docs/CLI.md`](./docs/CLI.md) — `hn` command and UX contract.
+- [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) — real hardware findings and current blockers.
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md) — ordered path to v1 and later capabilities.
+
+When changing the product architecture, update the decision ledger instead of relying on chat/history as the source of truth.
+
 ## Setup
 
 The controller needs Node 20+ and SSH/SCP. On first sync, `hn` downloads the pinned official Mutagen v0.18.1 release directly from GitHub, verifies it against the release's SHA256SUMS, and keeps the binary plus its agent bundle under `~/.hn/bin`. Homebrew is not required for Mutagen.
@@ -137,6 +150,8 @@ Windows does **not** require WSL.
 ## Current caveat
 
 Mutagen documents historical performance/stalling issues with Microsoft's Windows OpenSSH server. The architecture avoids extra Windows setup, but real performance still depends on the actual Windows SSH endpoint. `hn doctor` checks connectivity and required worker tools.
+
+Native-Windows persistent Zellij sessions are still under live-hardware validation; see [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) for the exact current state rather than assuming the persistence path is already proven.
 
 ## Third-party software
 
