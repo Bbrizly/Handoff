@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   paneMatchesCommand,
   parsePaneListOutput,
+  posixZellijRuntimeSetup,
   sessionNameFor,
   windowsDetachedZellijLaunchScript,
   windowsZellijRuntimeSetup,
@@ -10,10 +11,11 @@ import {
 
 const project = "/Users/me/GitHub/Palmier";
 
-test("default session names are stable for the same target, project and command", () => {
+test("default session names are stable and Handoff-prefixed", () => {
   const a = sessionNameFor("main", "pc", project, ["claude"], "roots");
   const b = sessionNameFor("main", "pc", project, ["claude"], "roots");
   assert.equal(a, b);
+  assert.match(a, /^hn-/);
 });
 
 test("different projects get different sessions even inside one sync root", () => {
@@ -57,15 +59,24 @@ test("pane JSON parser rejects non-JSON output", () => {
   assert.equal(parsePaneListOutput("session is still starting"), null);
 });
 
-test("Windows Zellij uses one stable Handoff-owned socket directory", () => {
+test("Windows Zellij uses Handoff-owned socket and config directories", () => {
   const setup = windowsZellijRuntimeSetup();
   assert.match(setup, /ZELLIJ_SOCKET_DIR/);
+  assert.match(setup, /ZELLIJ_CONFIG_DIR/);
   assert.match(setup, /\.hn\\zellij-sockets/);
-  assert.match(setup, /New-Item -ItemType Directory -Force/);
+  assert.match(setup, /\.hn\\zellij\\config/);
+});
+
+test("POSIX Zellij uses Handoff-owned socket and config directories", () => {
+  const setup = posixZellijRuntimeSetup();
+  assert.match(setup, /ZELLIJ_SOCKET_DIR/);
+  assert.match(setup, /ZELLIJ_CONFIG_DIR/);
+  assert.match(setup, /\.hn\/zellij-sockets/);
+  assert.match(setup, /\.hn\/zellij\/config/);
 });
 
 test("Windows background Zellij creation escapes the OpenSSH process job", () => {
-  const script = windowsDetachedZellijLaunchScript("main-pc-handoff-claude-1234");
+  const script = windowsDetachedZellijLaunchScript("hn-main-pc-handoff-claude-1234");
   assert.match(script, /Win32_ProcessStartup/);
   assert.match(script, /CreateFlags = \[uint32\]16777216/);
   assert.match(script, /Invoke-CimMethod -ClassName Win32_Process -MethodName Create/);
