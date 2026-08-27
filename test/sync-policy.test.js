@@ -43,7 +43,10 @@ test("Windows filename compatibility catches NTFS-invalid names", () => {
   assert.equal(isWindowsCompatibleName("trailing."), false);
 });
 
-test("Windows preflight finds incompatible paths but skips generated trees", () => {
+test("Windows preflight finds incompatible paths but skips generated trees", { skip: process.platform === "win32" }, () => {
+  // Windows itself cannot create the invalid filename required by this fixture.
+  // The name validator above remains cross-platform; the filesystem walk is
+  // exercised where such a filename can actually exist.
   const root = mkdtempSync(join(tmpdir(), "hn-win-path-"));
   try {
     mkdirSync(join(root, "docs"));
