@@ -1,0 +1,22 @@
+name: Runtime Integration
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  runtime:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Real Mutagen + Zellij integration
+        run: npm run test:integration
+        env:
+          HN_INTEGRATION: "1"
