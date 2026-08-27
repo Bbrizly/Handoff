@@ -507,7 +507,7 @@ A worker should feel like the user's own machine, not a stock install.
 hn profile enable claude
 ```
 
-adds the portable parts of the local Claude setup to the workspace: home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`.
+adds the portable parts of the local Claude setup to the workspace: canonical skill trees, Claude skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`.
 
 Requirements:
 
@@ -515,6 +515,8 @@ Requirements:
 - credentials, settings, MCP auth, plugins, history, sessions, and caches stay on the controller;
 - profile roots are trusted-target only;
 - built tool output inside a profile directory still synchronizes, because a skill's `dist/` is the skill;
+- cross-root skill links are reconstructed on the worker without overwriting an existing path;
+- plain Claude and Codex commands in the transparent Windows shell can access every shared workspace root;
 - `hn profile disable claude` terminates the sync sessions and removes the roots.
 
 ### FR-15: Explain what is shared

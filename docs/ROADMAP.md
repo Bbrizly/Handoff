@@ -248,9 +248,9 @@ Keep Handoff-managed infrastructure (SSH/Zellij) separate from user workload/too
 
 ## Phase 8 — Agent capability bridge
 
-**Status:** Portable capability files done; Git and MCP bridges remain
+**Status:** Portable capability files live-proven; Git and MCP bridges remain
 
-`hn profile enable claude` shares home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md` with trusted targets. Auth, MCP state, and caches were not part of that step and still need real bridges.
+`hn profile enable claude` shares canonical skill trees, Claude skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md` with trusted targets. Cross-root links are projected safely on Windows. The Lenovo canary matched 249 canonical agent skills and 261 portable Claude skills, then confirmed that interactive Claude discovered the complete set. Auth, MCP state, plugin installation state, and caches were not part of that step and still need real bridges.
 
 ### Local Git bridge
 

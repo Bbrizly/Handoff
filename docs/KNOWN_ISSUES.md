@@ -67,6 +67,8 @@ After synchronization is healthy:
 
 Only after this passes should native Windows persistence be marked solved.
 
+Session cleanup force-deletes the server, terminates an exact-match orphan only when it is Handoff's pinned Zellij binary, waits for asynchronous native-Windows shutdown, then removes the final resurrection record. Without that fallback and delay, a Session 0 server can rewrite the exited record after deletion. This prevents `hn sessions kill` from leaving an exited entry or hidden server process.
+
 ---
 
 ## 2. Generated output conflicts exposed incomplete defaults
@@ -429,18 +431,22 @@ Do not broadly sync global AI auth/config/cache directories as a workaround.
 
 ---
 
-## 16. Portable agent profile is not proven on the reference Windows worker
+## 16. Portable agent profile is proven on the reference Windows worker
 
-**Severity:** Low  
-**Status:** Implemented and unit tested, not yet run against real hardware
+**Severity:** Resolved live-hardware gap
+**Status:** Implemented and proven on the Lenovo
 
-`hn profile enable claude` and single-file roots work locally and in unit tests. What has not been observed on the Lenovo:
+The August 27, 2026 Lenovo canary proved:
 
-- Mutagen single-file session behavior for `~/.claude/CLAUDE.md`;
-- remote Claude actually loading the synchronized skills and subagents;
-- Windows filename compatibility across a real personal skills tree.
+- one standalone file outside the workspace synchronized Mac to Windows and back without sharing its parent;
+- all 249 canonical agent-skill names matched between Mac and Windows;
+- all 261 portable Claude-skill names matched after excluding macOS `.DS_Store`;
+- representative skill, subagent, and hook SHA-256 hashes matched byte-for-byte;
+- links crossing profile roots were reconstructed as Windows junctions, including the absolute `superpowers` link;
+- interactive Claude opened in the mapped Handoff directory and `/skills` reported 262 discovered skills;
+- the worker retained its own Claude credentials and Windows statusline configuration.
 
-The remote-filename preflight fails early for a file root Windows cannot represent, but the end-to-end path still needs one live run.
+The important boundary remains: machine settings, authentication, MCP state, plugin installation state, history, sessions, and caches are not portable profile data. Individual skills can still depend on programs that must be installed separately on the worker.
 
 ---
 

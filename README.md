@@ -98,9 +98,9 @@ hn workspace add main ~/notes.md hn/main/files/notes.md
 hn profile enable claude
 ```
 
-This shares the portable half of your local Claude setup: home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. Remote Claude then starts with the same abilities as local Claude.
+This shares the portable half of your local Claude setup: canonical skill trees, Claude skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. Remote Claude then starts with the same portable abilities as local Claude. Skill links are recreated safely on Windows, with replaced worker paths backed up under `~/.hn/backups`.
 
-Credentials, `settings.json`, MCP auth, plugins, history, sessions, and caches never leave the Mac. Profile roots only go to targets you marked trusted, so a rented box never gets them.
+The Mac copies of credentials, `settings.json`, MCP auth, plugin state, history, sessions, and caches are never sent. The worker keeps its own account, settings, plugins, and history. Profile roots only go to targets you marked trusted, so a rented box never gets them.
 
 ```bash
 hn profile list
@@ -146,7 +146,7 @@ Before starting a remote command, `hn` synchronizes every workspace root and wai
 
 On Windows, `hn` prefers real application shims (`.exe`, `.cmd`, `.bat`) over PowerShell `.ps1` wrappers. This avoids common execution-policy failures from npm-installed tools such as Codex, Claude, and npm without weakening the machine's PowerShell policy.
 
-A target alias opens a real interactive SSH PTY in the corresponding remote directory. From there, Handoff is out of the way:
+A target alias opens a real interactive SSH PTY in the corresponding remote directory. From there, Handoff is out of the way. In the Windows shell, plain `claude` and `codex` also receive every shared workspace directory through their native `--add-dir` options:
 
 ```bash
 claude

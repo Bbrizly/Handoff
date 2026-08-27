@@ -53,7 +53,7 @@ Legacy configuration:
 ~/.handoff/config.json
 ```
 
-is migrated to config version 3.
+is migrated to config version 4.
 
 Config is written with restrictive file permissions where supported.
 
@@ -597,7 +597,11 @@ Forwarding defaults to loopback endpoints.
 
 Project-local files inside a workspace may sync. User-global AI auth/cache/config trees should not be copied wholesale by Handoff.
 
-`hn profile enable claude` is the one exception, and it is an allowlist: skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. Credentials, settings, MCP auth, plugins, history, sessions, and caches are never included, and these roots only reach trusted targets.
+`hn profile enable claude` is the one exception, and it is an allowlist: canonical skill trees, Claude skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. Credentials, settings, MCP auth, plugins, history, sessions, and caches are never included, and these roots only reach trusted targets.
+
+Profile roots use their own sync policy. Skill build output such as `dist/` and `bin/` remains available, while dependency trees, caches, and secrets remain excluded. Portable symlinks within a root synchronize normally. Links that cross profile-root boundaries are projected after synchronization; on Windows they become junctions, and any replaced worker path is moved under `~/.hn/backups` first.
+
+For a transparent Windows shell, Handoff wraps the native Claude and Codex applications only for the lifetime of that PowerShell process. The wrappers supply every non-profile workspace root through the agents' supported `--add-dir` flags. They do not replace either executable, write a PowerShell profile, or alter the worker globally.
 
 `hn access <path>` reports whether a path is shared, where it lands, or why it stays local.
 

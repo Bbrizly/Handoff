@@ -339,9 +339,11 @@ hn profile list
 hn profile disable claude
 ```
 
-`enable` adds the portable parts of the local Claude setup to the workspace: home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. They map to the same paths under the worker's home, so remote Claude starts with the same abilities as local Claude.
+`enable` adds the portable parts of the local Claude setup to the workspace: canonical skill trees, Claude skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. They map to the same paths under the worker's home, so remote Claude starts with the same portable abilities as local Claude. Cross-root skill links become safe worker-native links after synchronization; an existing destination is backed up first.
 
-Credentials, `settings.json`, MCP auth, plugins, history, sessions, and caches are never included.
+Controller credentials, `settings.json`, MCP auth, plugins, history, sessions, and caches are never included. A worker continues using its own copies.
+
+On native Windows, plain `claude` and `codex` inside `hn pc` are shell-local wrappers around the real applications. They automatically receive the other shared workspace roots through `--add-dir`. Management commands are passed through untouched, and nothing is installed into the user's PowerShell profile.
 
 Profile roots carry `scope: trusted`. A target marked `remote` never receives them, with or without a workspace grant.
 
