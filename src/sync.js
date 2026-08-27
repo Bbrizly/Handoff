@@ -6,6 +6,12 @@
 // orchestration.
 
 import * as mutagen from "./mutagen.js";
+import {
+  listHandoffForwards,
+  listHandoffSyncs,
+  terminateHandoffForward,
+  terminateHandoffSync,
+} from "./mutagen-admin.js";
 
 export const syncBackend = Object.freeze({
   id: "mutagen",
@@ -16,12 +22,15 @@ export const syncBackend = Object.freeze({
   status: mutagen.getSyncStatus,
   sessionName: mutagen.syncSessionName,
   showStatus: mutagen.showSyncStatus,
-  terminate: mutagen.terminateSyncSession,
+  listOwned: listHandoffSyncs,
+  terminateOwned: terminateHandoffSync,
 });
 
 export const forwardingBackend = Object.freeze({
   id: "mutagen",
   ensure: mutagen.ensureForward,
+  listOwned: listHandoffForwards,
+  terminateOwned: terminateHandoffForward,
 });
 
 export const ensureSyncRoot = (...args) => syncBackend.ensureRoot(...args);
@@ -29,5 +38,8 @@ export const flushSyncSessions = (...args) => syncBackend.flush(...args);
 export const getSyncStatus = (...args) => syncBackend.status(...args);
 export const isSyncBackendInstalled = () => syncBackend.isAvailable();
 export const syncSessionName = (...args) => syncBackend.sessionName(...args);
-export const terminateSyncSession = (...args) => syncBackend.terminate(...args);
+export const listSyncSessions = () => syncBackend.listOwned();
+export const stopSyncSession = (...args) => syncBackend.terminateOwned(...args);
 export const ensureForward = (...args) => forwardingBackend.ensure(...args);
+export const listForwards = () => forwardingBackend.listOwned();
+export const stopForward = (...args) => forwardingBackend.terminateOwned(...args);
