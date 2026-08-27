@@ -38,10 +38,12 @@ test("real Zellij creates, controls, and kills an isolated Handoff session", { s
   const temp = mkdtempSync(join(tmpdir(), "hn-zellij-it-"));
   const archive = join(temp, asset.file);
   const extractDir = join(temp, "extract");
-  const socketDir = join(temp, "sockets");
+  // Zellij's Unix-domain socket path has a hard byte limit. macOS CI's TMPDIR
+  // is intentionally long, so keep only the socket namespace under /tmp just
+  // like production keeps it under the short ~/.hn/zellij-sockets path.
+  const socketDir = mkdtempSync("/tmp/hnz-");
   const configDir = join(temp, "config");
   mkdirSync(extractDir);
-  mkdirSync(socketDir);
   mkdirSync(configDir);
 
   const url = `https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/${asset.file}`;
@@ -87,6 +89,7 @@ test("real Zellij creates, controls, and kills an isolated Handoff session", { s
     assert.doesNotMatch(`${after.stdout}${after.stderr}`, new RegExp(session));
   } finally {
     run(binary, ["kill-session", session], { env, allowFailure: true });
+    rmSync(socketDir, { recursive: true, force: true });
     rmSync(temp, { recursive: true, force: true });
   }
 });
