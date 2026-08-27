@@ -85,7 +85,7 @@ Canonical config shape:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "activeTarget": "pc",
   "workers": {
     "pc": {
@@ -102,13 +102,31 @@ Canonical config shape:
       "roots": [
         {
           "local": "/Users/example/Documents/GitHub",
-          "remote": "hn/main/GitHub"
+          "remote": "hn/main/GitHub",
+          "kind": "directory"
+        },
+        {
+          "local": "/Users/example/.claude/skills",
+          "remote": ".claude/skills",
+          "kind": "directory",
+          "purpose": "claude-profile",
+          "policy": "agent-profile",
+          "scope": "trusted"
         }
       ]
     }
   }
 }
 ```
+
+A root records:
+
+- `kind`: `directory` or `file`. A file root synchronizes exactly one file, creates only its remote parent directory, and never becomes a project or terminal cwd.
+- `scope`: absent for normal roots, `trusted` for roots that must never reach a target marked `remote`.
+- `policy`: absent for normal roots, `agent-profile` for roots that use the agent-profile ignore set.
+- `purpose`: what created the root, so `hn profile` can list and remove its own roots.
+
+Older configs migrate on read. A root with no `kind` becomes a directory.
 
 ### 4.1 Active target is global
 
@@ -248,6 +266,8 @@ __pycache__/
 .env.*
 ```
 
+Roots with `policy: agent-profile` use a smaller set. Dependencies, caches, and secrets are still excluded, but built output such as `dist/` and `bin/` synchronizes, because a compiled skill or hook is the thing being shared rather than a rebuildable artifact of a project.
+
 Project `.claude` content is not ignored wholesale. Generated `.claude/worktrees/`, non-portable absolute symlinks, and exact Windows-incompatible paths are handled narrowly.
 
 ### 6.6 Safety gate before remote work
@@ -311,6 +331,8 @@ Codex:
 ```text
 --add-dir <root> --add-dir <root> ...
 ```
+
+Profile roots are excluded from `--add-dir`. They live at the worker's home paths where the agent already loads them.
 
 ### 8.2 Management commands
 
@@ -575,6 +597,10 @@ Forwarding defaults to loopback endpoints.
 
 Project-local files inside a workspace may sync. User-global AI auth/cache/config trees should not be copied wholesale by Handoff.
 
+`hn profile enable claude` is the one exception, and it is an allowlist: skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. Credentials, settings, MCP auth, plugins, history, sessions, and caches are never included, and these roots only reach trusted targets.
+
+`hn access <path>` reports whether a path is shared, where it lands, or why it stays local.
+
 ## 18. Architecture invariants
 
 The following should be treated as hard invariants unless an explicit ADR supersedes them:
@@ -589,3 +615,4 @@ The following should be treated as hard invariants unless an explicit ADR supers
 8. The core mapped interactive terminal must not depend on Zellij or another session manager.
 9. Handoff does not require its own hosted backend.
 10. Network overlay/provider concerns remain separable from core execution.
+11. Personal agent capability files reach trusted targets only, by explicit allowlist, and never carry credentials or caches.

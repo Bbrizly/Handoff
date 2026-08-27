@@ -86,6 +86,38 @@ hn workspace add main ~/Obsidian
 hn workspace add main ~/Downloads
 ```
 
+A root can also be one file, so you can share a single document without its folder:
+
+```bash
+hn workspace add main ~/notes.md hn/main/files/notes.md
+```
+
+### Your own Claude on every worker
+
+```bash
+hn profile enable claude
+```
+
+This shares the portable half of your local Claude setup: home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. Remote Claude then starts with the same abilities as local Claude.
+
+Credentials, `settings.json`, MCP auth, plugins, history, sessions, and caches never leave the Mac. Profile roots only go to targets you marked trusted, so a rented box never gets them.
+
+```bash
+hn profile list
+hn profile disable claude
+```
+
+`disable` stops the sync sessions and removes the roots. Files already copied to a worker stay on that worker until you delete them there.
+
+### What is actually shared
+
+```bash
+hn access
+hn access ~/GitHub/app/.env
+```
+
+It answers with the remote path, or with the reason a path stays local, or that the path is outside every workspace.
+
 ## Daily use
 
 ```bash

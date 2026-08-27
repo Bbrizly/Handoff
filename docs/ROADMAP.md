@@ -248,6 +248,10 @@ Keep Handoff-managed infrastructure (SSH/Zellij) separate from user workload/too
 
 ## Phase 8 — Agent capability bridge
 
+**Status:** Portable capability files done; Git and MCP bridges remain
+
+`hn profile enable claude` shares home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md` with trusted targets. Auth, MCP state, and caches were not part of that step and still need real bridges.
+
 ### Local Git bridge
 
 Expose selected controller Git capabilities to remote agents without synchronizing `.git`.

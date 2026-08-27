@@ -176,6 +176,10 @@ main
 
 Important: the accepted design is **not** lazy project-only synchronization. The initial root seed may be large, but after the persistent Mutagen session is established, normal operation transfers differences rather than re-copying the entire workspace for each command.
 
+A root is a directory or one regular file. A file root shares exactly that file, so a single document can be available remotely without exposing its folder.
+
+A root can also be marked trusted-only. Those roots never synchronize to a target marked `remote`, which is how personal agent capability files stay off shared or rented machines.
+
 ### 6.4 Project
 
 The project is the current local Git/project directory inside one workspace root. It determines command working directory and persistent session identity, but it does not redefine the workspace synchronization boundary.
@@ -444,6 +448,8 @@ Current strategy:
 - management/admin subcommands must not be polluted with workspace directory arguments;
 - `codex exec` receives `--skip-git-repo-check` because the worker intentionally lacks `.git`.
 
+Personal profile roots are deliberately excluded from `--add-dir`. They belong at the worker's home paths where the agent already looks for them, not in the project directory list.
+
 ### FR-10: Interactive terminal and optional persistent sessions
 
 The core terminal must be a real interactive SSH PTY in the mapped remote directory and must not depend on Zellij.
@@ -493,6 +499,34 @@ Development tools such as Claude, Codex, Node, Python, CUDA, Docker, and model r
 
 Future diagnostics should include synchronization problems and persistent-session viability.
 
+### FR-14: Portable agent profile
+
+A worker should feel like the user's own machine, not a stock install.
+
+```bash
+hn profile enable claude
+```
+
+adds the portable parts of the local Claude setup to the workspace: home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`.
+
+Requirements:
+
+- the path list is an allowlist, never all of `~/.claude`;
+- credentials, settings, MCP auth, plugins, history, sessions, and caches stay on the controller;
+- profile roots are trusted-target only;
+- built tool output inside a profile directory still synchronizes, because a skill's `dist/` is the skill;
+- `hn profile disable claude` terminates the sync sessions and removes the roots.
+
+### FR-15: Explain what is shared
+
+The user must be able to ask about any path:
+
+```bash
+hn access ~/GitHub/app/.env
+```
+
+Handoff answers shared with the remote path, local only with the reason, or outside every workspace.
+
 ## 9. Non-functional requirements
 
 ### NFR-1: No silent data loss
@@ -527,18 +561,20 @@ Errors must preserve the real underlying diagnostic. Generic messages such as â€
 - Config containing machine endpoints lives under `~/.hn` with restrictive permissions where applicable.
 - `.git` remains controller-only.
 - Handoff must not broadly synchronize user-global AI configuration/auth/cache directories such as `~/.claude`.
+- An explicit allowlist of portable agent capability files may synchronize to trusted targets only, and never carries credentials, settings, MCP auth, or caches.
 - Project-local agent instructions/configuration may synchronize when inside an explicit workspace root.
+- The user must be able to inspect what is shared and why, without reading the sync configuration.
 - Opening a port means forwarding only the requested loopback endpoint by default, not exposing the worker service publicly.
 
 ## 11. Current implementation snapshot
 
 At the time this document was created, the code already implements:
 
-- config v3 under `~/.hn/config.json` with migration from `~/.handoff/config.json`;
+- config v4 under `~/.hn/config.json` with migration from `~/.handoff/config.json`;
 - global active target;
 - worker add/pair/finish/bootstrap/doctor/list;
 - Windows OpenSSH bootstrap;
-- workspace create/add/list;
+- workspace create/add/list, with directory or single-file roots;
 - non-overlapping root validation;
 - persistent Mutagen root sessions using `two-way-resolved` and `--ignore-vcs`;
 - managed Mutagen v0.18.1 bootstrap on supported controller platforms;
@@ -554,6 +590,8 @@ At the time this document was created, the code already implements:
 - Windows application-shim preference;
 - oversized PowerShell transport fallback to SSH stdin;
 - one-shot remote execution;
+- opt-in trusted-only Claude profile roots through `hn profile`;
+- `hn access` sharing explanation;
 - status and doctor commands.
 
 The transparent core path is physically proven on native Windows: `hn pc` entered `C:\Users\Lenovo\hn\main\GitHub\Handoff`, Node returned `win32 x64`, Claude and Codex opened interactively, a Vite dev server ran remotely, and `hn port` exposed it through Mac localhost. Optional managed native-Windows Zellij creation remains experimental.

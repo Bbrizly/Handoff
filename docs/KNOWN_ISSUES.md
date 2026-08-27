@@ -344,6 +344,8 @@ A production removal operation must coordinate:
 3. update config;
 4. never propagate unintended deletions through a still-live sync session.
 
+`hn profile disable claude` does it correctly for the roots it owns: it terminates the matching sync sessions for every configured target first, then removes the roots. `hn workspace remove-root` is still config editing alone and needs the same treatment.
+
 Do not implement root removal as config editing alone.
 
 ---
@@ -423,9 +425,26 @@ Future work should bridge these intentionally.
 
 Do not broadly sync global AI auth/config/cache directories as a workaround.
 
+`hn profile enable claude` is not that workaround. It shares an allowlist of capability files with trusted targets and carries no auth, MCP state, or cache.
+
 ---
 
-## 16. Current exact sync state from the real reference workspace
+## 16. Portable agent profile is not proven on the reference Windows worker
+
+**Severity:** Low  
+**Status:** Implemented and unit tested, not yet run against real hardware
+
+`hn profile enable claude` and single-file roots work locally and in unit tests. What has not been observed on the Lenovo:
+
+- Mutagen single-file session behavior for `~/.claude/CLAUDE.md`;
+- remote Claude actually loading the synchronized skills and subagents;
+- Windows filename compatibility across a real personal skills tree.
+
+The remote-filename preflight fails early for a file root Windows cannot represent, but the end-to-end path still needs one live run.
+
+---
+
+## 17. Current exact sync state from the real reference workspace
 
 The real synchronization session that surfaced the above problems used:
 
