@@ -2,7 +2,7 @@
   "name": "hn",
   "version": "0.1.9",
   "private": true,
-  "description": "Local-first remote execution over SSH with Mutagen and Zellij",
+  "description": "Local-first mapped remote terminals and execution over SSH with Mutagen",
   "type": "module",
   "bin": {
     "hn": "./src/index.js"

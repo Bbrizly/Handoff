@@ -2,7 +2,7 @@
 
 This document defines the intended command surface and UX semantics for Handoff.
 
-The daily CLI is intentionally small. `hn` should feel like a local command even when it coordinates synchronization, SSH, persistent sessions, and forwarding underneath.
+The daily CLI is intentionally small. `hn` should disappear after it coordinates synchronization, path mapping, and a real interactive SSH PTY.
 
 ## 1. Core commands
 
@@ -12,12 +12,14 @@ hn status
 hn pc
 hn home
 hn aws
+hn use pc
 
 hn claude
 hn codex
 hn shell
 hn npm run dev
-hn new claude
+hn pc claude
+hn session claude
 hn exec npm test
 
 hn port 5173
@@ -70,26 +72,31 @@ hn aws
 
 Semantics:
 
-- update `activeTarget` locally;
-- do not SSH/bootstrap/sync just to select it;
-- output can be minimal, e.g. `pc`.
+- ensure/flush synchronization for the workspace containing the local cwd;
+- allocate a real interactive SSH PTY;
+- map the local cwd to the corresponding worker path;
+- enter the worker's native shell there.
 
-Combined target selection + command:
+Selection without connecting is explicit:
+
+```bash
+hn use pc
+hn worker default pc
+```
+
+Direct interactive target command:
 
 ```bash
 hn aws claude
 ```
 
-Semantics:
-
-1. set `aws` active;
-2. run the remaining command exactly as if invoked separately.
+This enters the mapped cwd and runs Claude directly with the PTY. It does not change the selected target or create a managed Zellij session.
 
 Target aliases are arbitrary configured names. `pc`, `home`, and `aws` are ergonomic examples/hints, not special backend types.
 
-## 4. Persistent commands
+## 4. Direct interactive commands
 
-Any non-reserved command is interpreted as a persistent remote command:
+Any non-reserved command uses the selected target and runs directly with an interactive PTY:
 
 ```bash
 hn claude
@@ -107,27 +114,27 @@ resolve local context
 → refuse conflicts/unhealthy sync
 → map cwd to remote cwd
 → augment supported agent command
-→ derive stable session identity
-→ create/repair persistent Zellij session
-→ attach local terminal
+→ open SSH PTY
+→ run command directly
 ```
 
-The same project + target + command should reconnect to the same session.
+The command lifetime is the SSH connection lifetime unless the user starts Zellij or another persistence tool explicitly.
 
-## 5. `hn new`
+## 5. `hn session`
 
 ```bash
-hn new claude
-hn new codex
+hn session
+hn session claude
+hn session new claude
 ```
 
-Creates a new independent persistent session by adding a unique token to session identity.
+This is the optional managed persistence layer behind `SessionBackend`. `new` adds a unique token to create an independent session.
 
-It must not replace or kill the stable default session.
+Native-Windows managed Zellij persistence remains experimental and must not block the core target terminal.
 
 ## 6. `hn shell`
 
-Starts or reconnects a persistent remote shell in the current mapped project directory.
+Opens the selected target's transparent remote shell in the current mapped project directory. This is equivalent to a target alias except that it uses the current selected target.
 
 Worker shell choice today:
 
@@ -147,7 +154,7 @@ hn exec node -e "console.log(process.platform, process.arch)"
 
 One-shot remote execution.
 
-It still passes through synchronization safety before execution but bypasses Zellij persistence.
+It still passes through synchronization safety but does not allocate an interactive PTY.
 
 This command is both a user feature and an important diagnostic primitive because it isolates remote execution from session-manager failures.
 
@@ -415,7 +422,9 @@ attach
 port
 exec
 shell
+session
 new
+use
 ```
 
 A target alias cannot use a reserved command name.
@@ -424,10 +433,11 @@ A target alias cannot use a reserved command name.
 
 - Product stays Handoff; binary stays `hn`.
 - `hn` with no args stays useful and cheap.
-- target selection stays local-only.
-- ordinary commands are persistent by default.
+- target aliases open a synchronized mapped interactive PTY.
+- target selection without connecting is explicit through `hn use` or `hn worker default`.
+- ordinary commands run directly and interactively; persistence is explicit.
 - `hn exec` remains explicitly one-shot.
-- `hn new` creates another session rather than mutating the default one.
+- `hn session` is the optional managed persistence surface.
 - `hn sync` means the whole configured workspace, not only the current project.
 - conflicts stop execution.
 - daily use should not expose manual SSH/cd/tunnel/multiplexer ceremony.

@@ -9,24 +9,15 @@ Severity terminology:
 - **Medium** — important production gap, workaround exists.
 - **Low** — polish/coverage gap.
 
-## 1. Native Windows Zellij persistence is not yet end-to-end proven
+## 1. Optional managed native-Windows Zellij persistence is not proven
 
-**Severity:** Blocker for the persistent-session golden path  
-**Status:** Under active live-hardware validation
+**Severity:** Medium experimental feature gap; no longer a core-path blocker
 
-Remote execution itself has been proven on the native Windows worker:
+**Status:** Root cause isolated; transparent terminal proven independently
 
-```bash
-hn exec node -e "console.log(process.platform, process.arch)"
-```
+The daily native-Windows path is proven: `hn pc` enters the mapped PowerShell PTY, Node reports `win32 x64`, Claude and Codex open interactively, and remote dev servers work through `hn port`.
 
-returned:
-
-```text
-win32 x64
-```
-
-The remaining proof is persistent Zellij session lifecycle.
+Only the explicit `hn session` backend remains unproven.
 
 ### Observed history
 
@@ -43,7 +34,15 @@ Improved diagnostics then showed:
 list-sessions: No active zellij sessions found.
 ```
 
-A Windows process-lifetime workaround was introduced to detach session creation from the short-lived OpenSSH exec tree. The first attempt to execute that larger launcher then hit:
+A Windows process-lifetime workaround was introduced to detach session creation from the short-lived OpenSSH exec tree. Live forensics established that the broad process-lifetime hypothesis was wrong:
+
+- a WMI-created Session 0 sleeper executed and survived the originating SSH connection;
+- the exact Zellij anchor executed;
+- its non-interactive/closed input caused the initial `cmd.exe` pane to exit;
+- Zellij printed `Bye from Zellij!` and exited with code 0 about 260 ms after startup;
+- no server therefore remained for the next SSH connection to inspect.
+
+An earlier launcher transport also hit:
 
 ```text
 The command line is too long.
@@ -51,18 +50,18 @@ The command line is too long.
 
 The PowerShell transport was updated so oversized scripts can stream over SSH stdin instead of being placed in a giant `-EncodedCommand` argument.
 
-The next live test was blocked **before reaching Zellij** by a real Mutagen conflict. Therefore the latest Windows Zellij path must not be described as proven yet.
+The remaining solution should use a supported headless layout or a tiny deterministic session host if Zellij still requires a durable console. It stays isolated behind `SessionBackend`; do not reintroduce it into `hn pc`.
 
 ### Required proof
 
 After synchronization is healthy:
 
 ```text
-1. hn claude
+1. hn session claude
 2. Claude opens on Windows
 3. close controller terminal
 4. open a new controller terminal
-5. run hn claude from the same project
+5. run hn session claude from the same project
 6. same live Claude session reattaches
 ```
 
@@ -70,10 +69,11 @@ Only after this passes should native Windows persistence be marked solved.
 
 ---
 
-## 2. Default sync ignores are incomplete
+## 2. Generated output conflicts exposed incomplete defaults
 
-**Severity:** High  
-**Status:** Proven by real conflict
+**Severity:** Resolved high-risk sync issue
+
+**Status:** Fixed in sync policy v2
 
 Current ignores:
 
@@ -81,14 +81,26 @@ Current ignores:
 node_modules/
 dist/
 build/
+bin/
+obj/
 .next/
 .nuxt/
 .output/
+.turbo/
 target/
 .gradle/
+DerivedData/
+.venv/
+venv/
+.tox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
 ```
 
 A real two-way conflict occurred on generated .NET build output:
@@ -99,22 +111,9 @@ Quadstick-Config-Manager/src/QuadStick.App/obj/Release/net8.0/QuadStickConfigMan
 
 The file changed independently on both endpoints and Mutagen correctly stopped.
 
-### Required change
+### Resolution
 
-Expand the generated-output defaults conservatively. Strong candidates:
-
-```text
-bin/
-obj/
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.turbo/
-```
-
-Potential additions should be evaluated rather than blindly copying a giant global gitignore. The purpose is to exclude deterministic/generated machine-specific state, not user source/assets.
+Policy v2 adds these as leaf-name patterns so they apply inside every nested project, not only at the workspace root. `.env` secrets are local by default while `.env.example` and `.env.sample` remain portable.
 
 ### Why this matters
 
@@ -129,8 +128,9 @@ Generated artifacts:
 
 ## 3. Project-local Claude/gstack absolute symlinks fail portable sync
 
-**Severity:** High for affected workspaces  
-**Status:** Proven
+**Severity:** Resolved high issue for known paths
+
+**Status:** Fixed with targeted preflight/ignores; richer diagnostics remain
 
 A real workspace scan reported at least 25 problems. Examples:
 
@@ -166,8 +166,9 @@ Project-local Claude files may contain legitimate instructions, skills, `CLAUDE.
 
 ## 4. macOS-valid filenames can be invalid on Windows
 
-**Severity:** High for cross-platform workspace completeness  
-**Status:** Proven
+**Severity:** Resolved high issue for known paths
+
+**Status:** Fixed with exact local-only ignores and warning; richer diagnostics remain
 
 A real Windows transition failure occurred on a PDF whose filename included a colon:
 
@@ -237,10 +238,11 @@ Handoff must:
 
 ---
 
-## 6. Mutagen monitor output is too noisy for normal healthy commands
+## 6. Mutagen monitor output was too noisy for normal healthy commands
 
-**Severity:** Medium  
-**Status:** Proven UX issue
+**Severity:** Resolved medium UX issue
+
+**Status:** Fixed; monitoring is explicit-sync only
 
 Current command startup can print full Mutagen metadata:
 
@@ -254,7 +256,7 @@ Beta:
 [!] Watching for changes
 ```
 
-This was useful while debugging the first seed, but it is too verbose for every `hn exec`/`hn claude` once healthy.
+This was useful while debugging the first seed, but it was too verbose for every `hn exec`/`hn pc` once healthy. Routine handoff and execution now flush quietly; explicit `hn sync` retains monitor output.
 
 ### Desired behavior
 
@@ -428,7 +430,7 @@ Do not broadly sync global AI auth/config/cache directories as a workaround.
 The real synchronization session that surfaced the above problems used:
 
 ```text
-Synchronization mode: Two Way Safe
+Synchronization mode: Two Way Resolved (alpha/controller authoritative on collisions)
 Hashing: default SHA-1
 Symbolic links: portable
 Ignore VCS: enabled
@@ -437,7 +439,7 @@ Scan mode: accelerated
 Remote compression: DEFLATE
 ```
 
-Observed state included:
+The historical v1 state included:
 
 ```text
 local scan problems: 25

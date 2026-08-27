@@ -20,9 +20,9 @@ Goal: no future engineer/agent should need chat history to know what Handoff is 
 
 ## Phase 1 — Make the real workspace healthy
 
-**Priority:** Immediate
+**Status:** Core policy v2 complete; richer path-level status remains
 
-The current reference workspace is blocked by problems that Handoff correctly surfaces but does not yet handle ergonomically.
+Generated roots, secrets, Claude worktrees, absolute symlinks, and exact Windows-incompatible paths now have targeted policy. The reference sync is healthy; path-level problem output remains product polish.
 
 ### 1.1 Fix default generated-output ignores
 
@@ -78,32 +78,29 @@ can show actual problem paths or direct the user to a first-class command that d
 
 ---
 
-## Phase 2 — Prove persistent native-Windows sessions
+## Phase 2 — Prove the transparent native-Windows terminal
 
-**Priority:** Immediate blocker
+**Status:** Complete on reference hardware
 
-The remote execution path is proven; Zellij persistence is not yet end-to-end proven after the latest Windows process-lifetime and PowerShell-transport fixes.
+The core no longer depends on Zellij. The mapped interactive PTY is proven with native PowerShell, Node, Claude, Codex, npm, Vite, and port forwarding.
 
 ### Smoke test
 
 ```bash
 cd <project>
-hn claude
+hn pc
 ```
 
 Acceptance:
 
-1. Claude opens and is running on Windows.
-2. Session appears in `hn sessions`.
-3. Local terminal can be closed.
-4. Claude process/session remains alive remotely.
-5. A new local terminal running `hn claude` reattaches the same session.
-6. `hn new claude` creates an independent second session.
-7. Exiting Claude intentionally is recognized and the next invocation creates a clean replacement.
+1. PowerShell opens on Windows in the corresponding mapped project path.
+2. Node reports `win32 x64`.
+3. Plain `claude` and `codex` open interactively.
+4. Direct forms such as `hn pc claude` work without managed sessions.
 
-### If still failing
+### Optional managed persistence follow-up
 
-Debug the real Windows process/session boundary with evidence from:
+`hn session` remains experimental. The root cause is now isolated to Zellij's Session 0 closed-input lifecycle, not generic WMI/OpenSSH descendant teardown. Continue with supported headless layouts or a minimal session host; keep it behind `SessionBackend`.
 
 - Zellij creation log;
 - `list-sessions`;
@@ -117,7 +114,7 @@ Do not switch the architecture to WSL/tmux as an unexamined workaround.
 
 ## Phase 3 — Prove round-trip editing
 
-**Priority:** Immediate after persistent session
+**Status:** Bidirectional live canary complete
 
 ### Worker → controller
 
@@ -156,10 +153,10 @@ Acceptance:
 If no meaningful sync work is required:
 
 ```text
-hn claude
+hn pc
 ```
 
-should not dump full Mutagen session metadata.
+`hn pc` should not dump full Mutagen session metadata. This quiet routine path is implemented; explicit `hn sync` retains monitoring.
 
 ### 4.2 Rich slow path
 
@@ -189,16 +186,18 @@ Use local/remote terminology in user-facing UX, not Mutagen alpha/beta.
 
 ## Phase 5 — Dev server flow
 
+**Status:** Explicit flow proven on reference hardware
+
 Prove:
 
 ```bash
-hn npm run dev
+hn pc npm run dev
 hn port 5173
 ```
 
 Acceptance:
 
-- server process persists in the expected project session;
+- server runs directly in the remote PTY (users may opt into Zellij themselves);
 - controller browser reaches localhost;
 - forwarding resumes/reuses deterministic Mutagen forwarding session;
 - user does not manually run SSH tunnel commands.
@@ -312,7 +311,6 @@ Handoff v1 is ready when this feels normal:
 ```bash
 cd ~/Documents/GitHub/Handoff
 hn pc
-hn claude
 ```
 
 and the user can forget the Lenovo exists as a separate interactive machine.
@@ -322,13 +320,13 @@ Required v1 proof:
 - native Windows without WSL;
 - healthy persistent full-workspace sync;
 - incremental diffs after first seed;
-- safe conflicts;
-- persistent Claude/Codex sessions;
-- close/reopen reattach;
+- alpha-authoritative simultaneous collision handling with remote-only edits preserved;
+- mapped native interactive terminal;
+- Claude/Codex/npm work naturally inside the remote shell;
 - round-trip edits;
 - one-shot `hn exec`;
 - manual `hn port`;
 - clear doctor/status/errors;
-- reproducible Handoff-managed Mutagen/Zellij bootstrap;
+- reproducible Handoff-managed Mutagen bootstrap and optional Zellij installation;
 - no remote `.git`;
 - no Handoff-hosted backend required.

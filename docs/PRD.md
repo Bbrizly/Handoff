@@ -13,7 +13,7 @@ The developer keeps their normal editor, local files, local Git repository, loca
 
 The intended feeling is:
 
-> Open the project locally, type `hn claude`, and stop caring which machine actually runs Claude.
+> Open the project locally, type `hn pc`, and continue in the corresponding directory on the worker as if the compute were local.
 
 Handoff is not a remote IDE. It is not a VPN. It is not a cloud filesystem. It is not a replacement for Git. It is the execution layer between a developer's local environment and their compute.
 
@@ -104,7 +104,8 @@ Handoff coordinates proven primitives instead of rebuilding them:
 
 - SSH for reachability and command transport;
 - Mutagen for synchronized workspaces and forwarding;
-- Zellij for persistent terminal sessions;
+- the worker's native shell for the daily interactive experience;
+- Zellij as an optional persistence layer;
 - Git remains Git;
 - Tailscale/LAN/VPN/cloud networking remains outside Handoff.
 
@@ -115,9 +116,9 @@ The product may do substantial work underneath, but the daily interface should r
 ```bash
 hn
 hn pc
-hn claude
-hn codex
-hn npm run dev
+claude
+codex
+npm run dev
 hn port 5173
 ```
 
@@ -257,7 +258,7 @@ Handoff must expose meaningful progress during this operation:
 
 A bare `syncing main -> pc...` with no feedback for a long initial seed is unacceptable UX.
 
-### 7.5 Daily target selection
+### 7.5 Daily handoff
 
 ```bash
 hn pc
@@ -265,52 +266,72 @@ hn home
 hn aws
 ```
 
-Target selection is local-only and should be effectively instant. It should not perform SSH/bootstrap merely to switch the selected alias.
+From a local project, a target alias means "take me there":
 
-Combined selection + execution is allowed:
+1. ensure and flush the configured workspace synchronization;
+2. open a real interactive SSH PTY to that worker;
+3. map the current local directory to its corresponding remote directory;
+4. enter the worker's normal native shell there.
+
+Changing the selected target without connecting is explicit:
+
+```bash
+hn use pc
+hn worker default pc
+```
+
+Direct interactive execution is allowed:
 
 ```bash
 hn aws claude
 ```
 
-### 7.6 Persistent agent
+This connects to `aws`, enters the mapped directory, and runs Claude directly with the SSH PTY. It does not implicitly create a Zellij session or change the selected target.
+
+### 7.6 Transparent remote terminal
 
 From a local project:
 
 ```bash
 cd ~/Documents/GitHub/Handoff
-hn claude
+hn pc
 ```
 
 Expected behavior:
 
-1. resolve workspace/project/active target;
+1. resolve workspace/project/explicit target;
 2. ensure worker is usable;
 3. ensure every workspace root's persistent synchronization session exists/resumes;
 4. flush synchronization and refuse unsafe state;
 5. map local working directory to remote path;
-6. create or reconnect the stable persistent project/target/command session;
-7. start Claude on the worker if not already alive;
-8. attach the local terminal to it;
-9. allow local terminal disconnect without killing the worker session;
-10. running `hn claude` later reattaches the same session.
+6. allocate a real interactive SSH PTY;
+7. enter native PowerShell on Windows or the user's login shell on POSIX;
+8. let the user run Claude, Codex, npm, Docker, Zellij, or any other worker tool normally.
 
-### 7.7 Additional session
+### 7.7 Optional managed persistence
 
 ```bash
-hn new claude
+hn session
+hn session claude
+hn session new claude
 ```
 
-Creates an independent persistent session instead of reusing the stable one.
+Managed persistence is layered behind `SessionBackend` and is not required for the transparent terminal or direct command paths. Users may also run `zellij` themselves inside `hn pc`.
 
 ### 7.8 Arbitrary remote work
 
-Persistent:
+Interactive on the selected target:
 
 ```bash
 hn npm run dev
 hn python train.py
 hn shell
+```
+
+Explicit target:
+
+```bash
+hn pc npm run dev
 ```
 
 One-shot:
@@ -367,7 +388,7 @@ Default remote roots live beneath `hn/<workspace>/...` in the remote user's home
 
 ### FR-5: Persistent bidirectional sync
 
-Each workspace-root/target tuple uses a persistent Mutagen two-way-safe session.
+Each workspace-root/target tuple uses a persistent Mutagen `two-way-resolved` session with the controller/alpha side authoritative only for simultaneous collisions.
 
 Requirements:
 
@@ -402,7 +423,7 @@ hn resolve <path> --local
 hn resolve <path> --remote
 ```
 
-Handoff must never silently resolve genuine source conflicts by making the controller or worker always win.
+Remote-only changes still return to the controller. If both sides independently change the same path before reconciliation, the controller/alpha version wins automatically by the accepted sync policy.
 
 ### FR-8: Git ownership
 
@@ -423,11 +444,11 @@ Current strategy:
 - management/admin subcommands must not be polluted with workspace directory arguments;
 - `codex exec` receives `--skip-git-repo-check` because the worker intentionally lacks `.git`.
 
-### FR-10: Persistent sessions
+### FR-10: Interactive terminal and optional persistent sessions
 
-Long-lived interactive work must survive local terminal disconnects.
+The core terminal must be a real interactive SSH PTY in the mapped remote directory and must not depend on Zellij.
 
-Zellij is the selected session backend.
+Zellij remains the selected optional session backend behind `SessionBackend`. Managed persistence should survive terminal disconnects when invoked explicitly with `hn session`, but failure of that optional backend must not block `hn pc`, direct interactive commands, or `hn exec`.
 
 Session identity must be stable for the same:
 
@@ -437,7 +458,7 @@ Session identity must be stable for the same:
 - command arguments;
 - workspace root mapping set.
 
-`hn new ...` adds a unique token.
+`hn session new ...` adds a unique token.
 
 Exited/stale sessions should be repaired rather than endlessly reattached.
 
@@ -480,7 +501,7 @@ Safety overrides convenience whenever source-of-truth is ambiguous.
 
 ### NFR-2: Low daily latency
 
-After first-time workspace initialization, `hn claude` should feel close to launching a local command when there are few/no pending changes.
+After first-time workspace initialization, `hn pc` should feel close to opening a local shell when there are few/no pending changes.
 
 ### NFR-3: Minimal Windows ceremony
 
@@ -513,26 +534,29 @@ Errors must preserve the real underlying diagnostic. Generic messages such as â€
 
 At the time this document was created, the code already implements:
 
-- config v2 under `~/.hn/config.json` with migration from `~/.handoff/config.json`;
+- config v3 under `~/.hn/config.json` with migration from `~/.handoff/config.json`;
 - global active target;
 - worker add/pair/finish/bootstrap/doctor/list;
 - Windows OpenSSH bootstrap;
 - workspace create/add/list;
 - non-overlapping root validation;
-- persistent Mutagen root sessions using `two-way-safe` and `--ignore-vcs`;
+- persistent Mutagen root sessions using `two-way-resolved` and `--ignore-vcs`;
 - managed Mutagen v0.18.1 bootstrap on supported controller platforms;
 - live Mutagen monitor output during single-session flushes;
 - duplicate Mutagen session repair;
 - manual Mutagen forwarding;
 - pinned Zellij 0.45.0 worker bootstrap;
 - stable persistent session naming;
+- transparent mapped SSH PTY handoff through target aliases;
+- direct interactive commands without implicit Zellij;
+- explicit optional persistence through `hn session`;
 - Claude/Codex multi-root augmentation;
 - Windows application-shim preference;
 - oversized PowerShell transport fallback to SSH stdin;
 - one-shot remote execution;
 - status and doctor commands.
 
-The core path has been physically proven through native Windows to the point where `hn exec node -e "console.log(process.platform, process.arch)"` returned `win32 x64`. Persistent native-Windows Zellij creation remains under active live-hardware validation.
+The transparent core path is physically proven on native Windows: `hn pc` entered `C:\Users\Lenovo\hn\main\GitHub\Handoff`, Node returned `win32 x64`, Claude and Codex opened interactively, a Vite dev server ran remotely, and `hn port` exposed it through Mac localhost. Optional managed native-Windows Zellij creation remains experimental.
 
 ## 12. Proven real-world synchronization lessons
 
@@ -575,20 +599,19 @@ Handoff v1 is successful when the following workflow is boring and reliable:
 ```bash
 cd ~/Documents/GitHub/Project
 hn pc
-hn claude
 ```
 
 And all of the following are true:
 
 1. the controller's local editor remains the primary editor;
-2. Claude runs on the selected worker;
+2. the terminal is a real native worker shell in the corresponding mapped directory;
 3. the project and allowed workspace roots are already synchronized or incrementally reconciled;
 4. Claude edits appear back on the controller quickly;
 5. local edits appear on the worker quickly;
 6. `.git` exists only on the controller;
-7. closing the local terminal does not kill Claude;
-8. `hn claude` reattaches later;
-9. switching worker does not require changing projects or editor configuration;
+7. Claude, Codex, npm, Docker, Python, and Zellij can be invoked normally inside that shell;
+8. direct forms such as `hn pc claude` run interactively without implicit session management;
+9. changing worker does not require changing projects or editor configuration;
 10. a remote dev server is reachable with `hn port`;
 11. conflicts and incompatible paths are visible and safe;
 12. Windows workers require no WSL.
@@ -622,6 +645,7 @@ These are compatible with the architecture but intentionally not part of the cor
 - first-class workspace root removal/migration;
 - automatic cross-platform filename remediation;
 - richer local daemon/background UX if needed for instant status and orchestration.
+- production-ready managed native-Windows session persistence beyond the transparent PTY core.
 
 ## 16. Product guardrails
 
@@ -634,6 +658,6 @@ Future changes must preserve these invariants unless an explicit product decisio
 5. **Tailscale is optional, not embedded into the product.**
 6. **Native Windows does not require WSL.**
 7. **Workspace roots represent the user's remote-access universe; project context does not silently shrink that universe.**
-8. **Synchronization conflicts stop remote work rather than being silently overwritten.**
-9. **Long-lived work survives terminal disconnects.**
+8. **Remote-only changes sync back; only simultaneous collisions prefer the controller/alpha side.**
+9. **The transparent terminal never depends on a session manager; persistence is optional.**
 10. **Core Handoff does not require a Handoff-hosted backend.**

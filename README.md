@@ -6,7 +6,7 @@ Local files. Compute anywhere.
 Mac                                  pc / home / aws
 ---                                  ---------------
 Zed + local files                    SSH reachable
-local .git                      SSH  Zellij
+local .git                      SSH  native shell + normal tools
 hn + Mutagen  ---------------------> Claude / Codex / builds
 localhost       <------------------- dev servers
 ```
@@ -90,28 +90,47 @@ hn workspace add main ~/Downloads
 
 ```bash
 hn          # status
-hn pc       # switch locally to pc (instant)
-hn home     # use home
-hn aws      # use aws
+hn pc       # synchronize, map this cwd, and open the native remote shell
+hn home     # take this project context to home
+hn aws      # take this project context to aws
+hn use pc   # select pc without connecting
 ```
 
 From a local project:
 
 ```bash
 cd ~/GitHub/Palmier
-hn claude
-hn codex
-hn npm run dev
+hn pc
+```
+
+Or run one direct interactive command:
+
+```bash
+hn pc claude
+hn pc npm run dev
 ```
 
 Before starting a remote command, `hn` synchronizes every workspace root and waits for a Mutagen sync cycle to finish. It refuses to start remote work when conflicts or an unhealthy sync are detected. Claude and Codex automatically receive the other workspace roots through `--add-dir`.
 
 On Windows, `hn` prefers real application shims (`.exe`, `.cmd`, `.bat`) over PowerShell `.ps1` wrappers. This avoids common execution-policy failures from npm-installed tools such as Codex, Claude, and npm without weakening the machine's PowerShell policy.
 
-A normal command reattaches its persistent project/target session. Start another independent session with:
+A target alias opens a real interactive SSH PTY in the corresponding remote directory. From there, Handoff is out of the way:
 
 ```bash
-hn new claude
+claude
+codex
+npm run dev
+python script.py
+docker compose up
+zellij
+```
+
+Direct local forms such as `hn pc claude` use the same mapped PTY without creating a hidden session. Optional managed persistence remains available behind `hn session` and `SessionBackend`:
+
+```bash
+hn session
+hn session claude
+hn session new claude
 ```
 
 Other useful commands:
@@ -151,7 +170,7 @@ Windows does **not** require WSL.
 
 Mutagen documents historical performance/stalling issues with Microsoft's Windows OpenSSH server. The architecture avoids extra Windows setup, but real performance still depends on the actual Windows SSH endpoint. `hn doctor` checks connectivity and required worker tools.
 
-Native-Windows persistent Zellij sessions are still under live-hardware validation; see [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) for the exact current state rather than assuming the persistence path is already proven.
+The transparent native-Windows terminal is proven on the reference Lenovo with Node, Claude, Codex, Vite, bidirectional sync, and port forwarding. Optional Handoff-managed native-Windows Zellij persistence remains experimental; users can run Zellij manually inside `hn pc` without making it a core dependency. See [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md).
 
 ## Third-party software
 

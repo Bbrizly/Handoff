@@ -317,11 +317,11 @@ function stopSyncMonitor(monitor) {
   }
 }
 
-export function flushSyncSessions(sessions) {
+export function flushSyncSessions(sessions, { monitor: showMonitor = false } = {}) {
   const requested = [...new Set(sessions.filter(Boolean))];
   if (!requested.length) return;
 
-  const monitor = requested.length === 1 ? startSyncMonitor(requested[0]) : null;
+  const monitor = showMonitor && requested.length === 1 ? startSyncMonitor(requested[0]) : null;
   try {
     runMutagen(["sync", "flush", ...requested], { capture: true });
   } finally {

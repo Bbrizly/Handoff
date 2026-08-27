@@ -11,6 +11,7 @@ import {
   updateConfig,
 } from "./config.js";
 import { augmentAgentCommand } from "./agent.js";
+import { targetAliasInvocation } from "./cli-routing.js";
 import { ensureControllerSshKey, windowsPairCommand } from "./pair.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
 import {
@@ -48,12 +49,12 @@ import {
   sessionNameFor,
   shellCommand,
 } from "./session.js";
-import { runRemoteCommand } from "./remote.js";
+import { runInteractiveRemoteCommand, runRemoteCommand } from "./remote.js";
 import { fail, normalizeName } from "./util.js";
 
 const RESERVED_COMMANDS = new Set([
   "help", "status", "doctor", "worker", "workspace", "sync", "sessions", "attach",
-  "port", "exec", "shell", "new", "on",
+  "port", "exec", "shell", "session", "new", "on", "use",
 ]);
 const TARGET_HINTS = new Set(["home", "pc", "aws", "local"]);
 
@@ -62,15 +63,15 @@ function help() {
 
 Everyday:
   hn                         status
-  hn pc                      use pc in this terminal
-  hn aws claude              use aws in this terminal + launch Claude
+  hn pc                      open pc at this project's mapped remote directory
+  hn aws claude              run Claude interactively on aws in the mapped directory
+  hn use pc                  use pc for commands without an explicit target
   hn on <target> <command>   one-shot target without changing terminal state
   HN_TARGET=pc hn claude     explicit environment override
-  hn claude                  persistent Claude in this project
-  hn codex                   persistent Codex in this project
-  hn new claude              start another Claude session
-  hn shell                   persistent remote shell
-  hn npm run dev             persistent arbitrary command
+  hn claude                  direct interactive Claude on the selected target
+  hn shell                   open the selected target's mapped remote shell
+  hn session claude          optional persistent Zellij session
+  hn session                 optional persistent Zellij shell
   hn exec npm test           one-shot remote command
   hn port 5173               remote 5173 -> local 5173
 
@@ -298,7 +299,7 @@ function syncWholeWorkspace(config, workspaceName, workspace) {
     ensureSyncRoot(workspaceName, target.name, worker, root),
   );
   console.log(`syncing ${workspaceName} -> ${target.name}...`);
-  flushSyncSessions(sessions.map((session) => session.name));
+  flushSyncSessions(sessions.map((session) => session.name), { monitor: true });
   console.log("sync ✓");
 }
 
@@ -345,6 +346,19 @@ function runPersistent(config, commandArgs, { unique = false, preparedWorker = n
   attachSession(worker, sessionName);
 }
 
+function runInteractive(config, targetName, commandArgs = [], { preparedWorker = null } = {}) {
+  let context = findContext(config, process.cwd());
+  const worker = preparedWorker ?? prepareTarget(config, targetName);
+  context = { ...context, targetName, worker };
+  ensureWorkspaceSync(context);
+
+  const remoteCwd = mapLocalToRemote(context.root, process.cwd());
+  const remoteArgs = commandArgs.length
+    ? augmentAgentCommand(commandArgs, context.workspace, remoteCwd)
+    : [];
+  runInteractiveRemoteCommand(worker, remoteCwd, remoteArgs);
+}
+
 async function main() {
   let argv = process.argv.slice(2);
   if (["help", "--help", "-h"].includes(argv[0])) {
@@ -368,14 +382,20 @@ async function main() {
 
   let [command, ...args] = argv;
   const possibleTarget = String(command).toLowerCase();
-  const configuredTarget = config.workers[possibleTarget];
-  const targetShorthandAllowed = args.length === 0 || TARGET_HINTS.has(possibleTarget);
-  if (!RESERVED_COMMANDS.has(possibleTarget) && configuredTarget && targetShorthandAllowed) {
-    selectTarget(config, possibleTarget, { quiet: args.length > 0 });
-    if (!args.length) return;
-    [command, ...args] = args;
-  } else if (TARGET_HINTS.has(possibleTarget) && !configuredTarget) {
+  const targetInvocation = RESERVED_COMMANDS.has(possibleTarget)
+    ? null
+    : targetAliasInvocation(config, command, args);
+  if (targetInvocation) {
+    runInteractive(config, targetInvocation.targetName, targetInvocation.commandArgs);
+    return;
+  } else if (TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
     fail(`Target '${possibleTarget}' is not configured. Run: hn worker pair ${possibleTarget} user@host`);
+  }
+
+  if (command === "use") {
+    requireArgs(args, 1, "hn use <target>");
+    selectTarget(config, args[0]);
+    return;
   }
 
   if (command === "status") {
@@ -593,12 +613,20 @@ async function main() {
 
   if (command === "shell") {
     const context = currentContext(config);
-    if (context.worker.platform && !context.worker.pending) {
-      runPersistent(config, shellCommand(context.worker));
-    } else {
-      const worker = prepareTarget(config, context.targetName);
-      runPersistent(config, shellCommand(worker), { preparedWorker: worker });
-    }
+    runInteractive(config, context.targetName);
+    return;
+  }
+
+  if (command === "session") {
+    const unique = args[0] === "new";
+    const sessionArgs = unique ? args.slice(1) : args;
+    const context = currentContext(config);
+    const worker = prepareTarget(config, context.targetName);
+    runPersistent(
+      config,
+      sessionArgs.length ? sessionArgs : shellCommand(worker),
+      { unique, preparedWorker: worker },
+    );
     return;
   }
 
@@ -608,7 +636,8 @@ async function main() {
     return;
   }
 
-  runPersistent(config, [command, ...args]);
+  const context = currentContext(config);
+  runInteractive(config, context.targetName, [command, ...args]);
 }
 
 main().catch((error) => {
