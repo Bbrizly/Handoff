@@ -256,7 +256,14 @@ exit $LASTEXITCODE
   return ["powershell.exe", "-NoLogo", "-NoProfile", "-EncodedCommand", encodePowerShell(script)];
 }
 
+function replacementPaneArgs(paneId) {
+  return paneId === null || paneId === undefined
+    ? []
+    : ["--in-place", "--close-replaced-pane", "--pane-id", String(paneId)];
+}
+
 function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, paneName) {
+  const replacementArgs = replacementPaneArgs(paneId);
   if (worker.platform === "windows") {
     const paneCommand = windowsCommandRunner(commandArgs);
     const elements = [
@@ -264,10 +271,7 @@ function startCommandPane(worker, sessionName, paneId, remoteCwd, commandArgs, p
       quotePowerShell(sessionName),
       quotePowerShell("action"),
       quotePowerShell("new-pane"),
-      quotePowerShell("--in-place"),
-      quotePowerShell("--close-replaced-pane"),
-      quotePowerShell("--pane-id"),
-      quotePowerShell(String(paneId)),
+      ...replacementArgs.map(quotePowerShell),
       quotePowerShell("--cwd"),
       "$hnCwd",
       quotePowerShell("--name"),
@@ -289,9 +293,10 @@ exit $LASTEXITCODE
   }
 
   const command = commandArgs.map(quotePosix).join(" ");
+  const replacement = replacementArgs.map(quotePosix).join(" ");
   const script = `${posixZellijRuntimeSetup()}\n${posixCwdSetup(remoteCwd)}
 z="$HOME/.hn/bin/zellij"
-"$z" --session ${quotePosix(sessionName)} action new-pane --in-place --close-replaced-pane --pane-id ${quotePosix(String(paneId))} --cwd "$hn_cwd" --name ${quotePosix(paneName)} -- ${command}
+"$z" --session ${quotePosix(sessionName)} action new-pane ${replacement} --cwd "$hn_cwd" --name ${quotePosix(paneName)} -- ${command}
 `;
   runPosix(worker, script, { capture: true });
 }
@@ -304,10 +309,13 @@ export function ensurePersistentCommand(worker, sessionName, remoteCwd, commandA
 
   if (panes) killSession(worker, sessionName);
   panes = createBackgroundSession(worker, sessionName);
-  const initialPane = panes.find((pane) => !pane.is_plugin && !pane.exited);
-  if (!initialPane) fail(`Zellij session '${sessionName}' has no terminal pane.`);
+  const initialPane = panes.find((pane) => !pane.is_plugin && !pane.exited) ?? null;
 
-  startCommandPane(worker, sessionName, initialPane.id, remoteCwd, commandArgs, paneName);
+  // In headless/noninteractive environments Zellij can successfully create the
+  // session while its bootstrap shell exits immediately. A live bootstrap pane
+  // is therefore an optimization (replace it in-place), not a correctness
+  // requirement. If it has already exited, create the command as a fresh pane.
+  startCommandPane(worker, sessionName, initialPane?.id ?? null, remoteCwd, commandArgs, paneName);
   inspection = inspectSession(worker, sessionName, { attempts: 30, delayMs: 100 });
   if (!inspection.panes?.some((pane) => paneMatchesCommand(pane, commandArgs, paneName))) {
     fail(`Remote command '${commandArgs[0]}' did not start inside Zellij (${diagnosticText(inspection.result)}).`);
