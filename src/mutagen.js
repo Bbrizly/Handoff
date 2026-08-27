@@ -11,6 +11,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { syncPolicy, SYNC_POLICY_VERSION } from "./sync-policy.js";
 import { shortHash, fail, quotePosix } from "./util.js";
 
 const MUTAGEN_VERSION = "0.18.1";
@@ -25,20 +26,6 @@ const SESSION_RECORD_TEMPLATE = `{{range .}}{{.Name}}|{{.Identifier}}|{{.Creatio
 {{end}}`;
 const SYNC_STATUS_TEMPLATE = `{{range .}}{{.Status.Description}}|{{if .SessionState}}{{len .Conflicts}}|{{.ExcludedConflicts}}{{else}}0|0{{end}}
 {{end}}`;
-
-const DEFAULT_IGNORES = [
-  "node_modules/",
-  "dist/",
-  "build/",
-  ".next/",
-  ".nuxt/",
-  ".output/",
-  "target/",
-  ".gradle/",
-  "__pycache__/",
-  "*.pyc",
-  ".DS_Store",
-];
 
 export function commandExists(command) {
   if (process.platform === "win32") {
@@ -210,6 +197,12 @@ function namedSessions(kind, name, options = {}) {
     .sort((a, b) => String(a.creationTime).localeCompare(String(b.creationTime)));
 }
 
+function terminateNamedSessions(kind, name) {
+  for (const record of namedSessions(kind, name)) {
+    runMutagen([kind, "terminate", record.identifier], { capture: true, allowFailure: true });
+  }
+}
+
 function repairDuplicateNamedSessions(kind, name) {
   const matches = namedSessions(kind, name);
   if (!matches.length) return null;
@@ -236,8 +229,16 @@ export function workerIdentity(worker) {
   return `${worker.user ?? ""}@${worker.host}:${worker.port ?? 22}`;
 }
 
+function syncIdentity(workspaceName, targetName, worker, root) {
+  return `${workspaceName}:${targetName}:${workerIdentity(worker)}:${root.local}:${root.remote}`;
+}
+
+export function legacySyncSessionName(workspaceName, targetName, worker, root) {
+  return `hn-sync-${shortHash(syncIdentity(workspaceName, targetName, worker, root))}`;
+}
+
 export function syncSessionName(workspaceName, targetName, worker, root) {
-  return `hn-sync-${shortHash(`${workspaceName}:${targetName}:${workerIdentity(worker)}:${root.local}:${root.remote}`)}`;
+  return `hn-sync-v${SYNC_POLICY_VERSION}-${shortHash(syncIdentity(workspaceName, targetName, worker, root))}`;
 }
 
 export function ensureSyncRoot(workspaceName, targetName, worker, root) {
@@ -248,8 +249,20 @@ export function ensureSyncRoot(workspaceName, targetName, worker, root) {
     return { name, identifier: session.identifier, created: false };
   }
 
-  const args = ["sync", "create", "--name", name, "--sync-mode", "two-way-safe", "--ignore-vcs"];
-  for (const pattern of DEFAULT_IGNORES) args.push("--ignore", pattern);
+  // Policy v2 changes the mode and ignore set. Old sessions lock their creation
+  // configuration, so terminate the known v1 session before recreating it. This
+  // never deletes endpoint data; it only removes Mutagen's session metadata.
+  terminateNamedSessions("sync", legacySyncSessionName(workspaceName, targetName, worker, root));
+
+  const policy = syncPolicy(root, worker);
+  if (policy.incompatible.length) {
+    const preview = policy.incompatible.slice(0, 3).join(", ");
+    const extra = policy.incompatible.length > 3 ? ` (+${policy.incompatible.length - 3} more)` : "";
+    console.warn(`hn: ${policy.incompatible.length} Windows-incompatible path${policy.incompatible.length === 1 ? "" : "s"} will stay local: ${preview}${extra}`);
+  }
+
+  const args = ["sync", "create", "--name", name, "--sync-mode", policy.mode, "--ignore-vcs"];
+  for (const pattern of policy.ignores) args.push("--ignore", pattern);
   args.push(root.local, mutagenEndpoint(worker, root.remote));
   runMutagen(args, { capture: true });
 
@@ -342,6 +355,10 @@ export function showSyncStatus(session) {
     return;
   }
   process.stdout.write(result.stdout);
+}
+
+export function terminateSyncSession(session) {
+  runMutagen(["sync", "terminate", session], { capture: true, allowFailure: true });
 }
 
 export function ensureForward(worker, key, remotePort, localPort = remotePort) {
