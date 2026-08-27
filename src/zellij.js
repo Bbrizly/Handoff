@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import { encodePowerShell, runPosix, runPowerShell, runSsh } from "./ssh.js";
+import { windowsDetachedLaunchScript } from "./windows-detach.js";
 import { remotePathExpression } from "./worker.js";
 import { fail, quotePosix, quotePowerShell, shortHash, slug } from "./util.js";
 
@@ -68,41 +69,7 @@ try {
 }
 exit $hnCode
 `;
-  const encoded = encodePowerShell(childScript);
-
-  return `
-$ErrorActionPreference = 'Stop'
-$hnEnvironment = @(Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" })
-$startup = New-CimInstance -CimClass (Get-CimClass -ClassName Win32_ProcessStartup) -ClientOnly
-# Windows OpenSSH can tear down descendants when an exec channel closes. Spawn
-# a long-lived Zellij anchor through WMI, explicitly escaping the sshd job and
-# giving Zellij a real Windows console while keeping that console hidden.
-# CREATE_BREAKAWAY_FROM_JOB (0x01000000) | CREATE_NEW_CONSOLE (0x00000010)
-$startup.CreateFlags = [uint32]16777232
-$startup.ShowWindow = [uint16]0
-$startup.EnvironmentVariables = [string[]]$hnEnvironment
-$childPowerShell = Join-Path $PSHOME 'powershell.exe'
-$commandLine = '"' + $childPowerShell + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}'
-$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-  CommandLine = $commandLine
-  CurrentDirectory = $HOME
-  ProcessStartupInformation = $startup
-}
-if ($created.ReturnValue -ne 0) {
-  throw "Win32_Process.Create failed with return value $($created.ReturnValue)."
-}
-Start-Sleep -Milliseconds 150
-$spawned = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($created.ProcessId)" -ErrorAction SilentlyContinue
-if (-not $spawned) {
-  throw "Detached Zellij anchor exited before Handoff could verify it."
-}
-$owner = Invoke-CimMethod -InputObject $spawned -MethodName GetOwner -ErrorAction SilentlyContinue
-if ($owner -and $owner.ReturnValue -eq 0 -and $owner.User -and $owner.User -ine $env:USERNAME) {
-  try { Invoke-CimMethod -InputObject $spawned -MethodName Terminate -Arguments @{ Reason = 1 } | Out-Null } catch {}
-  throw "Detached Zellij launcher ran as '$($owner.User)' instead of '$env:USERNAME'."
-}
-Write-Output ("hn-zellij-anchor:{0}" -f $created.ProcessId)
-`;
+  return windowsDetachedLaunchScript(childScript, { marker: "hn-zellij-anchor" });
 }
 
 function runZellij(worker, args, options = {}) {

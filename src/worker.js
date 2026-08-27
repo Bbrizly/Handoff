@@ -1,18 +1,8 @@
-import { createHash } from "node:crypto";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-} from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import { copyToWorker, runPosix, runPowerShell, testSsh } from "./ssh.js";
+import { ensureCachedRelease, runLocal } from "./runtime-assets.js";
 import { fail, quotePosix, quotePowerShell } from "./util.js";
 
 export const ZELLIJ_VERSION = "0.45.0";
@@ -122,36 +112,14 @@ function assetFor(worker) {
   return asset;
 }
 
-function sha256(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function runLocal(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8" });
-  if (result.error) fail(`${command} failed to start: ${result.error.message}`);
-  if ((result.status ?? 1) !== 0) {
-    fail(`${command} failed (${result.status ?? 1}): ${(result.stderr || result.stdout || "").trim()}`);
-  }
-}
-
 function ensureCachedArchive(asset) {
-  const cacheDir = join(homedir(), ".hn", "cache", "zellij", ZELLIJ_VERSION);
-  mkdirSync(cacheDir, { recursive: true });
-  const archivePath = join(cacheDir, asset.file);
-  if (existsSync(archivePath) && sha256(archivePath) === asset.sha256) return archivePath;
-  if (existsSync(archivePath)) unlinkSync(archivePath);
-
-  const tempPath = `${archivePath}.tmp-${process.pid}`;
-  const url = `https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/${asset.file}`;
-  try {
-    runLocal("curl", ["-fL", "--retry", "3", "--connect-timeout", "10", "-o", tempPath, url]);
-    const actual = sha256(tempPath);
-    if (actual !== asset.sha256) fail(`Zellij checksum mismatch: expected ${asset.sha256}, got ${actual}.`);
-    renameSync(tempPath, archivePath);
-  } finally {
-    if (existsSync(tempPath)) unlinkSync(tempPath);
-  }
-  return archivePath;
+  return ensureCachedRelease({
+    name: "zellij",
+    version: ZELLIJ_VERSION,
+    file: asset.file,
+    url: `https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/${asset.file}`,
+    sha256: asset.sha256,
+  });
 }
 
 function extractZellij(asset, archivePath) {
@@ -197,11 +165,18 @@ export function ensureRemoteDirectory(worker, remotePath) {
   ensureRemoteDirectories(worker, [remotePath]);
 }
 
-export function bootstrapWorker(worker, { quiet = false } = {}) {
+// Reaching a worker must never install a persistence runtime. A plain
+// 'hn pc' pays for SSH and platform detection, nothing else.
+export function prepareWorkerCore(worker, { quiet = false } = {}) {
   const ssh = testSsh(worker);
   if (ssh.code !== 0) fail(`Cannot SSH to ${worker.target}. ${(ssh.stderr || ssh.stdout).trim()}`);
 
   const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
+  if (!quiet) console.log(`ready  ${metadata.platform}/${metadata.arch}`);
+  return metadata;
+}
+
+export function ensurePersistenceRuntime(metadata, { quiet = false } = {}) {
   const current = zellijVersion(metadata);
   if (current.code === 0 && current.stdout.includes(ZELLIJ_VERSION)) {
     if (!quiet) console.log(`ready  ${metadata.platform}/${metadata.arch} · Zellij ${ZELLIJ_VERSION}`);
@@ -229,13 +204,16 @@ export function bootstrapWorker(worker, { quiet = false } = {}) {
   return metadata;
 }
 
+export function bootstrapWorker(worker, { quiet = false } = {}) {
+  return ensurePersistenceRuntime(prepareWorkerCore(worker, { quiet: true }), { quiet });
+}
+
 export function doctorWorker(worker) {
   const ssh = testSsh(worker);
   const checks = {
     ssh: ssh.code === 0,
     platform: worker.platform ?? "unknown",
     arch: worker.arch ?? "unknown",
-    zellij: false,
     claude: false,
     codex: false,
     node: false,
@@ -245,9 +223,6 @@ export function doctorWorker(worker) {
   const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
   checks.platform = metadata.platform;
   checks.arch = metadata.arch;
-  const zellij = zellijVersion(metadata);
-  checks.zellij = zellij.code === 0 && zellij.stdout.includes(ZELLIJ_VERSION);
-
   if (metadata.platform === "windows") {
     const script = `
 @{

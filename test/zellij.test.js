@@ -81,7 +81,8 @@ test("Windows Zellij creation uses detached launch flags", () => {
   assert.match(script, /Win32_ProcessStartup/);
   assert.match(script, /CreateFlags = \[uint32\]16777232/);
   assert.match(script, /EnvironmentVariables/);
-  assert.match(script, /Detached Zellij launcher ran as/);
+  assert.match(script, /The detached process ran as/);
+  assert.match(script, /hn-zellij-anchor/);
 });
 
 test("Windows session cleanup targets only Handoff's exact Zellij server", () => {

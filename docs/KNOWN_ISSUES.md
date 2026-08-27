@@ -475,3 +475,26 @@ conflicts: 1
 This is valuable product evidence: Handoff's safety gate correctly prevented starting remote Claude while the workspace was not clean.
 
 The next step is not to disable the gate; it is to improve ignores and problem-resolution UX until a normal workspace stays healthy.
+
+---
+
+## 18. The persistent desk has never had a human sitting in it
+
+Every mechanical step is proven on the reference Lenovo: install, detached server, two projects, no duplicates, a long-running process surviving closed SSH sessions, Claude detected with a state, and the TUI rendering over Handoff's PTY with mouse tracking on.
+
+What has not happened is a person using it. Nobody has clicked a project in the sidebar, answered a blocked agent, closed the Mac terminal for an hour, or come back with `hn pc -p`. Until that happens the feature is proven, not lived in.
+
+Also open:
+
+- worker reboot is untested. Herdr restores projects, tabs, panes, and cwd; arbitrary processes do not come back, and agent conversation resume needs Herdr's optional integrations, which Handoff does not install;
+- terminal history across a server restart is deliberately left off. Saved screen contents can hold tokens and prompts;
+- `pane run` for `hn pc -p <command>` quotes arguments for the pane's shell but does not handle an executable path containing spaces;
+- `hn session`, `hn new`, and `hn attach` still use Zellij. They are the legacy surface and are scheduled for removal.
+
+---
+
+## 19. Persistent mode inspects terminal output on the worker
+
+The desk recognizes agents and their states by looking at what panes are printing on that machine. That is how `blocked`, `working`, `done`, and `idle` are known at all.
+
+That state stays on the worker. Handoff does not collect it, and nothing is uploaded anywhere. Anyone who does not want terminal inspection should not use `-p`; plain `hn pc` does none of it.

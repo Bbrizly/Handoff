@@ -18,7 +18,8 @@ test("legacy worker-bound workspaces migrate to a global default target", () => 
   });
   assert.equal(config.workers.pc.trust, "trusted");
   assert.equal(config.activeTarget, "pc");
-  assert.equal(config.version, 4);
+  assert.equal(config.version, 5);
+  assert.match(config.controllerId, /^[0-9a-f]{32}$/);
 });
 
 test("explicit default target wins when there is no terminal override", () => {
@@ -55,4 +56,12 @@ test("target precedence is environment then shell then global default", () => {
   assert.equal(chooseTarget(config, { envTarget: "pc", shellTarget: "home" }), "pc");
   assert.equal(chooseTarget(config, { shellTarget: "home" }), "home");
   assert.equal(chooseTarget(config), "aws");
+});
+
+test("the controller id survives a reload", async () => {
+  const { normalizeConfig } = await import("../src/config.js");
+  const first = normalizeConfig({});
+  const again = normalizeConfig(first);
+  assert.equal(again.controllerId, first.controllerId);
+  assert.notEqual(normalizeConfig({}).controllerId, first.controllerId);
 });
