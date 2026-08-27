@@ -835,3 +835,70 @@ Native-Windows managed persistence remains experimental. Live forensics showed t
 The controller/Mac is the alpha endpoint. Local-only and remote-only edits both propagate. Only simultaneous divergence on the same path resolves automatically in favor of alpha.
 
 This preserves remote-to-Mac edits while matching the local-canonical product model and removes routine manual conflict handling. Generated artifacts and secrets remain excluded so conflict precedence is reserved for actual synchronized content.
+
+---
+
+## HN-061 — Personal agent capability files may sync to trusted targets
+
+**Status:** Accepted; narrows HN-048
+
+Remote Claude was capable but not *yours*: home-level skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md` stayed on the controller.
+
+`hn profile enable claude` adds those paths to a workspace as ordinary roots with `scope: "trusted"`, so they never reach a target marked `remote`.
+
+Canonical skill trees outside `~/.claude` are included when Claude skill entries link to them. Links that cross profile roots are reconstructed on the worker after synchronization. Native Windows uses junctions and moves any replaced destination under `~/.hn/backups` first.
+
+The allowlist is deliberate. These stay local:
+
+```text
+.credentials.json  settings.json  .claude.json  mcp auth
+plugins  history  sessions  shell-snapshots  todos  caches  projects
+```
+
+HN-048 still holds for auth, cache, and MCP state. What changed is that portable capability files are not auth state, and copying them is what makes a worker feel like the user's own machine.
+
+Rejected: synchronize all of `~/.claude`.
+
+---
+
+## HN-062 — A workspace root may be a single file
+
+**Status:** Accepted
+
+Roots used to be directories only, so sharing one file meant sharing its whole parent.
+
+A root now records `kind: "file" | "directory"`. A file root:
+
+- creates only its remote parent directory;
+- never becomes a terminal or project cwd, so `hn pc` still lands in a real directory;
+- passes its parent directory, not itself, to agent `--add-dir`;
+- fails early when the remote filename cannot exist on a Windows worker.
+
+This is what makes `~/.claude/CLAUDE.md` shareable without dragging `~/.claude` along with it.
+
+---
+
+## HN-063 — `hn access` answers "is this shared?"
+
+**Status:** Accepted
+
+Ignore policy is invisible. A user could not tell whether a path reached the worker without reading the sync configuration.
+
+```bash
+hn access
+hn access ~/GitHub/app/.env
+```
+
+reports one of three states: shared with its remote path, local only with the reason, or outside every workspace. Privacy rules the user cannot inspect are not privacy rules.
+
+---
+
+## HN-064 — Transparent Windows shells expose every shared root to agents
+
+**Status:** Accepted
+
+Direct commands such as `hn pc claude` already augmented Claude and Codex with the other workspace roots. Typing plain `claude` after entering `hn pc` did not, which made the transparent shell less capable than the direct form.
+
+The Windows shell bootstrap now defines process-local wrappers around the resolved native Claude and Codex applications. They add every non-profile workspace root with the applications' supported `--add-dir` arguments and pass management commands through unchanged. The wrappers do not modify the PowerShell profile or replace installed tools.
+
+The reference Lenovo proved both wrappers resolve as functions over the real applications, Claude opens in the mapped project, and the synchronized skills are discoverable. Equivalent transparent wrapping on POSIX interactive shells remains later portability work; direct POSIX agent forms already receive the additional roots.

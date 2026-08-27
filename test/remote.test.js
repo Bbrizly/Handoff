@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { gunzipSync } from "node:zlib";
 import * as remote from "../src/remote.js";
 
 function decodedPowerShell(args) {
   const encodedIndex = args.indexOf("-EncodedCommand");
   assert.notEqual(encodedIndex, -1, "interactive Windows invocation must use encoded PowerShell");
-  return Buffer.from(args[encodedIndex + 1], "base64").toString("utf16le");
+  const script = Buffer.from(args[encodedIndex + 1], "base64").toString("utf16le");
+  const compressed = script.match(/\$hnPayload = '([^']+)'/);
+  return compressed
+    ? gunzipSync(Buffer.from(compressed[1], "base64")).toString("utf8")
+    : script;
 }
 
 test("interactive Windows shell stays open in the mapped remote directory", () => {
@@ -24,6 +29,24 @@ test("interactive Windows shell stays open in the mapped remote directory", () =
   assert.match(script, /claude.*codex.*cursor/s);
   assert.match(script, /\.hn\\bin/);
   assert.match(script, /\$env:Path/);
+});
+
+test("interactive Windows shell wraps agents with every auxiliary workspace directory", () => {
+  const args = remote.interactivePowerShellArgs(
+    "hn/main/GitHub/Handoff",
+    [],
+    { agentDirs: ["../../Obsidian", "../../files"] },
+  );
+  const script = decodedPowerShell(args);
+
+  assert.match(script, /function global:claude/);
+  assert.match(script, /function global:codex/);
+  assert.match(script, /Remove-Item Alias:claude/);
+  assert.match(script, /Remove-Item Alias:codex/);
+  assert.match(script, /\.\.\/\.\.\/Obsidian/);
+  assert.match(script, /\.\.\/\.\.\/files/);
+  assert.match(script, /--add-dir/);
+  assert.ok(args[args.indexOf("-EncodedCommand") + 1].length <= 6000);
 });
 
 test("interactive Windows command runs directly with PTY-capable PowerShell", () => {

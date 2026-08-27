@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findContext, findProjectRoot, isInside, mapLocalToRemote } from "../src/resolve.js";
+import { findContext, findProjectRoot, isInside, mapLocalToRemote, tryFindContext } from "../src/resolve.js";
 
 const slash = process.platform === "win32" ? "\\" : "/";
 
@@ -39,6 +39,16 @@ test("findContext chooses the deepest matching root", () => {
   };
   const context = findContext(config, p(git, "Palmier"));
   assert.equal(context.root.remote, "hn/main/GitHub");
+});
+
+test("individual file shares are auxiliary and never become terminal cwd roots", () => {
+  const file = p("", "Users", "me", "notes.md");
+  const config = {
+    workspaces: {
+      main: { roots: [{ local: file, remote: "hn/main/files/notes.md", kind: "file" }] },
+    },
+  };
+  assert.equal(tryFindContext(config, file), null);
 });
 
 test("findProjectRoot uses the nearest local Git repository", () => {

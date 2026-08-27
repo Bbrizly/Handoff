@@ -230,7 +230,8 @@ export function workerIdentity(worker) {
 }
 
 function syncIdentity(workspaceName, targetName, worker, root) {
-  return `${workspaceName}:${targetName}:${workerIdentity(worker)}:${root.local}:${root.remote}`;
+  const policy = root.policy ? `:${root.policy}` : "";
+  return `${workspaceName}:${targetName}:${workerIdentity(worker)}:${root.local}:${root.remote}${policy}`;
 }
 
 export function legacySyncSessionName(workspaceName, targetName, worker, root) {

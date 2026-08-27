@@ -1,12 +1,48 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  classifyWorkspaceRoot,
   normalizeRemotePath,
+  remoteRootDirectory,
   remotePathsOverlap,
+  workspaceRootsForTarget,
   validateWorkerAssignment,
   workerEndpointsEqual,
   workspaceAllowsTarget,
 } from "../src/workspace.js";
+
+test("workspace roots distinguish directories from individual files", () => {
+  const temp = mkdtempSync(join(tmpdir(), "hn-root-kind-"));
+  try {
+    const directory = join(temp, "folder");
+    const file = join(temp, "notes.md");
+    mkdirSync(directory);
+    writeFileSync(file, "hello\n");
+    assert.equal(classifyWorkspaceRoot(directory), "directory");
+    assert.equal(classifyWorkspaceRoot(file), "file");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("file roots create only their remote parent directory", () => {
+  assert.equal(remoteRootDirectory({ kind: "directory", remote: "hn/main/GitHub" }), "hn/main/GitHub");
+  assert.equal(remoteRootDirectory({ kind: "file", remote: "hn/main/files/notes.md" }), "hn/main/files");
+});
+
+test("personal profile roots only synchronize to trusted targets", () => {
+  const workspace = {
+    roots: [
+      { local: "/code", remote: "hn/main/code", kind: "directory" },
+      { local: "/skills", remote: ".claude/skills", kind: "directory", scope: "trusted" },
+    ],
+  };
+  assert.equal(workspaceRootsForTarget(workspace, { trust: "trusted" }).length, 2);
+  assert.deepEqual(workspaceRootsForTarget(workspace, { trust: "remote" }), [workspace.roots[0]]);
+});
 
 test("remote paths normalize to portable forward slashes", () => {
   assert.equal(normalizeRemotePath("~/hn\\main\\GitHub/"), "hn/main/GitHub");

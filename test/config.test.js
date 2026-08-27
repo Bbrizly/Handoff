@@ -13,12 +13,12 @@ test("legacy worker-bound workspaces migrate to a global default target", () => 
     },
   });
   assert.deepEqual(config.workspaces.main, {
-    roots: [{ local: "/tmp/GitHub", remote: "hn/main/GitHub" }],
+    roots: [{ local: "/tmp/GitHub", remote: "hn/main/GitHub", kind: "directory" }],
     grants: [],
   });
   assert.equal(config.workers.pc.trust, "trusted");
   assert.equal(config.activeTarget, "pc");
-  assert.equal(config.version, 3);
+  assert.equal(config.version, 4);
 });
 
 test("explicit default target wins when there is no terminal override", () => {

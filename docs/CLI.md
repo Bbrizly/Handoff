@@ -28,6 +28,9 @@ hn port 3000 3001
 hn sessions
 hn attach <session>
 hn doctor
+
+hn access
+hn profile enable claude
 ```
 
 ## 2. `hn` / `hn status`
@@ -304,6 +307,14 @@ Custom remote path:
 hn workspace add main ~/Documents/GitHub hn/main/code
 ```
 
+Add a single file:
+
+```bash
+hn workspace add main ~/notes.md hn/main/files/notes.md
+```
+
+A root is a directory or one regular file. A file root shares exactly that file. It never becomes a project or terminal directory, and only its remote parent directory is created on the worker.
+
 List:
 
 ```bash
@@ -319,7 +330,52 @@ hn workspace delete <workspace>
 
 These commands must safely account for existing Mutagen sessions; they are not just config deletion operations.
 
-## 12. Sessions
+## 12. Personal agent profile
+
+```bash
+hn profile enable claude
+hn profile enable claude main
+hn profile list
+hn profile disable claude
+```
+
+`enable` adds the portable parts of the local Claude setup to the workspace: canonical skill trees, Claude skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. They map to the same paths under the worker's home, so remote Claude starts with the same portable abilities as local Claude. Cross-root skill links become safe worker-native links after synchronization; an existing destination is backed up first.
+
+Controller credentials, `settings.json`, MCP auth, plugins, history, sessions, and caches are never included. A worker continues using its own copies.
+
+On native Windows, plain `claude` and `codex` inside `hn pc` are shell-local wrappers around the real applications. They automatically receive the other shared workspace roots through `--add-dir`. Management commands are passed through untouched, and nothing is installed into the user's PowerShell profile.
+
+Profile roots carry `scope: trusted`. A target marked `remote` never receives them, with or without a workspace grant.
+
+`disable` terminates the matching sync sessions first, then removes the roots. Files already copied to a worker stay on that worker; `hn` says so instead of implying a remote wipe.
+
+## 13. `hn access`
+
+```bash
+hn access
+hn access ~/GitHub/app/.env
+```
+
+Answers whether one path reaches the worker:
+
+```text
+shared ✓    /Users/me/GitHub/app/src/index.js
+remote      ~/hn/main/GitHub/app/src/index.js
+workspace   main  directory
+```
+
+```text
+local only  /Users/me/GitHub/app/.env
+reason      environment secrets stay local
+```
+
+```text
+not shared  /Users/me/Desktop/scratch.txt
+```
+
+Sharing rules the user cannot inspect are not trustworthy, so this command exists to make ignore policy and trust scope visible.
+
+## 14. Sessions
 
 List:
 
@@ -335,7 +391,7 @@ hn attach main-pc-handoff-claude-...
 
 Stable session names should remain deterministic enough for Handoff to reconnect, but users should not be required to manually construct them.
 
-## 13. Doctor
+## 15. Doctor
 
 ```bash
 hn doctor
@@ -363,7 +419,7 @@ Future useful checks:
 - remote disk space;
 - optional workload-specific checks.
 
-## 14. Future conflict UX
+## 16. Future conflict UX
 
 Desired:
 
@@ -396,7 +452,7 @@ hn resolve <path> --remote
 
 Naming of `--local`/`--remote` is preferred over Mutagen's `alpha`/`beta` user-facing terminology.
 
-## 15. Output principles
+## 17. Output principles
 
 1. **Conclusion first.** Tell the user what is happening.
 2. **Progress for slow work.** Never look hung when data is moving.
@@ -406,7 +462,7 @@ Naming of `--local`/`--remote` is preferred over Mutagen's `alpha`/`beta` user-f
 6. **No infrastructure jargon unless needed.** Prefer `local`/`remote`, workspace/target/project over `alpha`/`beta`.
 7. **Safe action hints.** Error messages should provide the next command when Handoff can identify it.
 
-## 16. Reserved commands
+## 18. Reserved commands
 
 Current reserved top-level command family includes:
 
@@ -425,11 +481,13 @@ shell
 session
 new
 use
+profile
+access
 ```
 
 A target alias cannot use a reserved command name.
 
-## 17. CLI invariants
+## 19. CLI invariants
 
 - Product stays Handoff; binary stays `hn`.
 - `hn` with no args stays useful and cheap.
@@ -440,4 +498,6 @@ A target alias cannot use a reserved command name.
 - `hn session` is the optional managed persistence surface.
 - `hn sync` means the whole configured workspace, not only the current project.
 - conflicts stop execution.
+- personal profile sharing is opt-in, trusted-target only, and reversible.
+- the user can always ask what is shared with `hn access`.
 - daily use should not expose manual SSH/cd/tunnel/multiplexer ceremony.

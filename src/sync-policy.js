@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fail } from "./util.js";
 
 export const SYNC_POLICY_VERSION = 2;
@@ -37,6 +37,23 @@ export const DEFAULT_IGNORES = [
   "**/.claude/worktrees/",
 ];
 
+export const AGENT_PROFILE_IGNORES = [
+  "node_modules",
+  ".DS_Store",
+  ".env",
+  ".env.*",
+  "!.env.example",
+  "!.env.sample",
+  ".venv",
+  "venv",
+  ".tox",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "__pycache__",
+  "*.pyc",
+];
+
 const WALK_SKIP_DIRS = new Set([
   ".git", ".svn", ".hg",
   "node_modules", "dist", "build", "bin", "obj", ".next", ".nuxt", ".output",
@@ -68,12 +85,15 @@ function toSlash(value) {
   return String(value).replaceAll("\\", "/");
 }
 
-function isGeneratedWalkPath(rel, name) {
+function isGeneratedWalkPath(rel, name, { agentProfile = false } = {}) {
+  if (agentProfile && new Set(["dist", "build", "bin", "obj", "target"]).has(name)) {
+    return false;
+  }
   if (WALK_SKIP_DIRS.has(name)) return true;
   return rel === ".claude/worktrees" || rel.endsWith("/.claude/worktrees");
 }
 
-function walkRoot(rootLocal, visitor, { limit = 100 } = {}) {
+function walkRoot(rootLocal, visitor, { limit = 100, agentProfile = false } = {}) {
   const found = [];
   const stack = [rootLocal];
 
@@ -95,7 +115,7 @@ function walkRoot(rootLocal, visitor, { limit = 100 } = {}) {
         found.push(rel);
         continue;
       }
-      if (entry.isDirectory() && !isGeneratedWalkPath(rel, entry.name)) stack.push(absolute);
+      if (entry.isDirectory() && !isGeneratedWalkPath(rel, entry.name, { agentProfile })) stack.push(absolute);
     }
   }
 
@@ -121,7 +141,11 @@ export function findNonPortableSymlinks(rootLocal, options = {}) {
     ({ entry, absolute }) => {
       if (!entry.isSymbolicLink()) return false;
       try {
-        return !isPortableSymlinkTarget(readlinkSync(absolute));
+        const target = readlinkSync(absolute);
+        if (!isPortableSymlinkTarget(target)) return true;
+        const resolved = resolve(dirname(absolute), target);
+        const rel = relative(rootLocal, resolved);
+        return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
       } catch {
         return true;
       }
@@ -139,17 +163,17 @@ function safeExactIgnores(paths, rootLocal, reason) {
   return paths;
 }
 
-function windowsCompatibilityIgnores(rootLocal) {
+function windowsCompatibilityIgnores(rootLocal, options = {}) {
   return safeExactIgnores(
-    findWindowsIncompatiblePaths(rootLocal),
+    findWindowsIncompatiblePaths(rootLocal, options),
     rootLocal,
     "Windows cannot represent",
   );
 }
 
-function nonPortableSymlinkIgnores(rootLocal) {
+function nonPortableSymlinkIgnores(rootLocal, options = {}) {
   return safeExactIgnores(
-    findNonPortableSymlinks(rootLocal),
+    findNonPortableSymlinks(rootLocal, options),
     rootLocal,
     "Mutagen portable symlink mode cannot synchronize",
   );
@@ -157,12 +181,21 @@ function nonPortableSymlinkIgnores(rootLocal) {
 
 export function syncPolicy(root, worker) {
   const custom = readHnIgnore(root.local);
-  const incompatible = worker.platform === "windows" ? windowsCompatibilityIgnores(root.local) : [];
-  const nonPortableSymlinks = nonPortableSymlinkIgnores(root.local);
+  if (worker.platform === "windows" && root.kind === "file" && !isWindowsCompatibleName(posix.basename(root.remote))) {
+    fail(`Windows cannot represent remote file '${root.remote}'. Choose a compatible remote filename.`);
+  }
+  const scanOptions = { agentProfile: root.policy === "agent-profile" };
+  const incompatible = worker.platform === "windows" ? windowsCompatibilityIgnores(root.local, scanOptions) : [];
+  const nonPortableSymlinks = nonPortableSymlinkIgnores(root.local, scanOptions);
   return {
     version: SYNC_POLICY_VERSION,
     mode: SYNC_MODE,
-    ignores: [...new Set([...DEFAULT_IGNORES, ...custom, ...incompatible, ...nonPortableSymlinks])],
+    ignores: [...new Set([
+      ...(root.policy === "agent-profile" ? AGENT_PROFILE_IGNORES : DEFAULT_IGNORES),
+      ...custom,
+      ...incompatible,
+      ...nonPortableSymlinks,
+    ])],
     incompatible,
     nonPortableSymlinks,
   };

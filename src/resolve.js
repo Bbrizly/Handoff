@@ -41,6 +41,7 @@ export function tryFindContext(config, cwd = process.cwd(), workspaceName) {
   for (const [name, workspace] of entries) {
     if (!workspace) continue;
     for (const root of workspace.roots ?? []) {
+      if (root.kind === "file") continue;
       const local = normalizeLocalPath(root.local);
       if (isInside(local, current)) {
         matches.push({

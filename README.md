@@ -86,6 +86,38 @@ hn workspace add main ~/Obsidian
 hn workspace add main ~/Downloads
 ```
 
+A root can also be one file, so you can share a single document without its folder:
+
+```bash
+hn workspace add main ~/notes.md hn/main/files/notes.md
+```
+
+### Your own Claude on every worker
+
+```bash
+hn profile enable claude
+```
+
+This shares the portable half of your local Claude setup: canonical skill trees, Claude skills, subagents, commands, rules, hooks, output styles, and `~/.claude/CLAUDE.md`. Remote Claude then starts with the same portable abilities as local Claude. Skill links are recreated safely on Windows, with replaced worker paths backed up under `~/.hn/backups`.
+
+The Mac copies of credentials, `settings.json`, MCP auth, plugin state, history, sessions, and caches are never sent. The worker keeps its own account, settings, plugins, and history. Profile roots only go to targets you marked trusted, so a rented box never gets them.
+
+```bash
+hn profile list
+hn profile disable claude
+```
+
+`disable` stops the sync sessions and removes the roots. Files already copied to a worker stay on that worker until you delete them there.
+
+### What is actually shared
+
+```bash
+hn access
+hn access ~/GitHub/app/.env
+```
+
+It answers with the remote path, or with the reason a path stays local, or that the path is outside every workspace.
+
 ## Daily use
 
 ```bash
@@ -114,7 +146,7 @@ Before starting a remote command, `hn` synchronizes every workspace root and wai
 
 On Windows, `hn` prefers real application shims (`.exe`, `.cmd`, `.bat`) over PowerShell `.ps1` wrappers. This avoids common execution-policy failures from npm-installed tools such as Codex, Claude, and npm without weakening the machine's PowerShell policy.
 
-A target alias opens a real interactive SSH PTY in the corresponding remote directory. From there, Handoff is out of the way:
+A target alias opens a real interactive SSH PTY in the corresponding remote directory. From there, Handoff is out of the way. In the Windows shell, plain `claude` and `codex` also receive every shared workspace directory through their native `--add-dir` options:
 
 ```bash
 claude

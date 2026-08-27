@@ -67,6 +67,8 @@ After synchronization is healthy:
 
 Only after this passes should native Windows persistence be marked solved.
 
+Session cleanup force-deletes the server, terminates an exact-match orphan only when it is Handoff's pinned Zellij binary, waits for asynchronous native-Windows shutdown, then removes the final resurrection record. Without that fallback and delay, a Session 0 server can rewrite the exited record after deletion. This prevents `hn sessions kill` from leaving an exited entry or hidden server process.
+
 ---
 
 ## 2. Generated output conflicts exposed incomplete defaults
@@ -344,6 +346,8 @@ A production removal operation must coordinate:
 3. update config;
 4. never propagate unintended deletions through a still-live sync session.
 
+`hn profile disable claude` does it correctly for the roots it owns: it terminates the matching sync sessions for every configured target first, then removes the roots. `hn workspace remove-root` is still config editing alone and needs the same treatment.
+
 Do not implement root removal as config editing alone.
 
 ---
@@ -423,9 +427,30 @@ Future work should bridge these intentionally.
 
 Do not broadly sync global AI auth/config/cache directories as a workaround.
 
+`hn profile enable claude` is not that workaround. It shares an allowlist of capability files with trusted targets and carries no auth, MCP state, or cache.
+
 ---
 
-## 16. Current exact sync state from the real reference workspace
+## 16. Portable agent profile is proven on the reference Windows worker
+
+**Severity:** Resolved live-hardware gap
+**Status:** Implemented and proven on the Lenovo
+
+The August 27, 2026 Lenovo canary proved:
+
+- one standalone file outside the workspace synchronized Mac to Windows and back without sharing its parent;
+- all 249 canonical agent-skill names matched between Mac and Windows;
+- all 261 portable Claude-skill names matched after excluding macOS `.DS_Store`;
+- representative skill, subagent, and hook SHA-256 hashes matched byte-for-byte;
+- links crossing profile roots were reconstructed as Windows junctions, including the absolute `superpowers` link;
+- interactive Claude opened in the mapped Handoff directory and `/skills` reported 262 discovered skills;
+- the worker retained its own Claude credentials and Windows statusline configuration.
+
+The important boundary remains: machine settings, authentication, MCP state, plugin installation state, history, sessions, and caches are not portable profile data. Individual skills can still depend on programs that must be installed separately on the worker.
+
+---
+
+## 17. Current exact sync state from the real reference workspace
 
 The real synchronization session that surfaced the above problems used:
 
