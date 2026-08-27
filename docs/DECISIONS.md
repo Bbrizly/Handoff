@@ -938,3 +938,42 @@ hn pc -p -- foo --persist       # one flag consumed, the rest is the command
 ```
 
 A bare `hn -p` uses the selected target.
+
+---
+
+## HN-067 — Herdr is the persistent desk, Handoff does not build a multiplexer
+
+**Status:** Accepted
+
+`hn pc -p` needs terminals that outlive the SSH connection, real panes on native Windows, projects a user can click between, and per-agent state so the agent that is waiting can be seen. Writing that means writing a terminal multiplexer: PTY renderer, ANSI parser, mouse layout, sidebar, scrollback.
+
+Handoff pins Herdr v0.8.2 (Apache-2.0) instead. Verified against the upstream release rather than taken on trust: five published assets, all five SHA-256 sums matching the pins in `src/herdr.js`, native Windows support via ConPTY, a headless `herdr server`, a JSON socket API, and its own project/agent sidebar with `blocked`, `working`, `done`, `idle`, and `unknown` states.
+
+The boundary holds: everything Herdr-specific lives in `src/herdr.js`, one Herdr runtime maps to one Handoff target plus workspace, and one Herdr workspace maps to one Git project. Handoff is not Herdr, and the transparent `hn pc` path does not know Herdr exists.
+
+Rejected: building a Handoff TUI, and Herdr's own `--remote` thin client, which does not support Windows remote hosts. Handoff already owns SSH, so attaching runs a Herdr client on the worker through Handoff's own PTY.
+
+---
+
+## HN-068 — A desk project is keyed by label first, token second
+
+**Status:** Accepted
+
+Herdr can hold a metadata token per workspace, which is the natural place for the mapped remote root. Measured against the reference worker: workspaces, labels, tabs, panes, and cwd survive a server restart. **Metadata tokens do not.**
+
+So the durable key is the label, which Handoff owns and makes unique itself (`app`, `app 2`) instead of trusting a folder basename to be distinct. The token `hn_root` is the exact match while the server is up and is re-applied on every attach.
+
+Matching is token first, then label. Proven on the Lenovo: stop the server, restart it, ask for the same project, and Handoff reconnects to the existing workspace and re-tags it rather than creating a duplicate.
+
+---
+
+## HN-069 — One detached-launch primitive for native Windows
+
+**Status:** Accepted
+
+Windows OpenSSH tears down descendants when the exec channel closes, so a background server started the obvious way dies with the SSH command that started it. Zellij already had a working answer buried in its module: spawn through WMI with `CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_CONSOLE`, hidden window, and an owner check.
+
+That is now `src/windows-detach.js`, shared by both backends. Two failures were measured on the way there and are worth keeping written down:
+
+- `Start-Process` alone is not enough. The server starts, answers while the SSH session is open, and is gone once it closes.
+- `Start-Process -RedirectStandardOutput` kills Herdr silently. It needs real console handles; redirecting its stdio to a file leaves a zero-byte log and no server. Herdr writes its own log under its session directory, so Handoff redirects nothing.

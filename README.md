@@ -169,7 +169,9 @@ hn -p             # selected target
 
 `--p` and `--persist` mean the same thing. Handoff reads the flag only before the remote command, so `hn pc npm run dev -- --persist` still passes `--persist` to npm.
 
-Nothing installs a persistence runtime until the first `-p`.
+That opens a desk: every synchronized project on that machine in one sidebar, with the agent in each one showing whether it is blocked, working, done, or idle. Click a project or an agent to switch. Close the terminal whenever you want; `hn pc -p` comes back to the same panes and the same running processes.
+
+The desk runs on [Herdr](https://herdr.dev), pinned and checksum-verified like everything else Handoff installs. Nothing installs it until your first `-p`.
 
 Other useful commands:
 

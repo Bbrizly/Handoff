@@ -123,6 +123,23 @@ hn pc -p -- foo --persist        # one flag consumed, the rest is the command
 
 Persistent mode is the only thing that installs a persistence runtime on a worker. A plain `hn pc` never does.
 
+What you get is a desk, not a session name:
+
+```text
+PROJECTS / AGENTS
+! Handoff
+  ! claude   BLOCKED
+* Palmier
+  * codex    WORKING
+o drawer
+```
+
+One desk per controller + workspace on that target. Each synchronized Git project is one entry in it. Click a project or an agent to switch; close the terminal whenever; `hn pc -p` comes back to the same panes and the same running processes.
+
+Persistent mode is project-scoped, not directory-scoped. Running it from deep inside a project opens that project's desk, and an existing desk keeps the directory it already has. Plain `hn pc` still lands in the exact subdirectory you were in.
+
+`hn pc -p claude` returns to the Claude already running in that project instead of starting a second one. Any other command runs in the project's focused pane.
+
 ## 4. Direct interactive commands
 
 Any non-reserved command uses the selected target and runs directly with an interactive PTY:
@@ -432,7 +449,7 @@ pc  windows/x64
   ✓ claude
   ✓ codex
   ✓ node
-  ✓ persistence
+  ✓ persistence  (Herdr 0.8.2)
   ✓ mutagen (controller)
 ```
 

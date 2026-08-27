@@ -436,9 +436,22 @@ On POSIX, Handoff enters the user's login shell. Direct forms such as `hn pc cla
 
 ### 12.2 Why Zellij remains available
 
-Zellij remains the optional persistent session backend because it is cross-platform and has native Windows support. tmux and mandatory WSL remain rejected. Core Handoff does not depend on this backend.
+The persistent desk (`hn <target> -p`) runs on Herdr, pinned at v0.8.2 and Apache-2.0. Everything Handoff knows about Herdr lives in `src/herdr.js`; nothing outside that module builds a Herdr command line.
 
-The dependency is now enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; `ensurePersistenceRuntime()` installs the multiplexer and is only reached from persistent commands. `hn doctor` reports a missing runtime as `— persistence`, not a failure.
+```text
+Handoff target + workspace     ->  one Herdr session (the desk)
+one synchronized Git project   ->  one Herdr workspace inside it
+```
+
+The desk is named `hn-<controller-id-short>-<workspace>`, so two controllers sharing a worker never attach to each other's desk. The controller id is generated once and stored in `~/.hn/config.json` (version 5).
+
+Herdr runs under a Handoff-owned config at `~/.hn/herdr/config.toml`, selected with `HERDR_CONFIG_PATH`. The user's own `~/.config/herdr/config.toml` is never touched. Handoff turns off onboarding and update checks, sorts the sidebar by attention, and drops the branch/git rows because the synchronized tree has no `.git`.
+
+Attaching does not use Herdr's own `--remote` client, which does not support Windows remote hosts. Handoff already owns SSH, so it runs a Herdr client on the worker through its own PTY.
+
+Zellij remains only behind the legacy `hn session` commands because it is cross-platform and has native Windows support. tmux and mandatory WSL remain rejected. Core Handoff does not depend on either backend.
+
+The dependency is enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; the persistence runtime installs only when a persistent command asks for it. `hn doctor` reports a missing runtime as `— persistence`, not a failure.
 
 Pinned version:
 
