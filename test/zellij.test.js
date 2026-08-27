@@ -6,6 +6,7 @@ import {
   posixZellijRuntimeSetup,
   sessionNameFor,
   windowsDetachedZellijLaunchScript,
+  windowsZellijProcessCleanupScript,
   windowsZellijRuntimeSetup,
 } from "../src/zellij.js";
 
@@ -81,4 +82,13 @@ test("Windows Zellij creation uses detached launch flags", () => {
   assert.match(script, /CreateFlags = \[uint32\]16777232/);
   assert.match(script, /EnvironmentVariables/);
   assert.match(script, /Detached Zellij launcher ran as/);
+});
+
+test("Windows session cleanup targets only Handoff's exact Zellij server", () => {
+  const script = windowsZellijProcessCleanupScript("hn-main-pc-project-claude-abc123");
+
+  assert.match(script, /\.hn\\bin\\zellij\.exe/);
+  assert.match(script, /ExecutablePath -ieq \$hnZellij/);
+  assert.match(script, /\[regex\]::Escape\('hn-main-pc-project-claude-abc123'\)/);
+  assert.match(script, /Invoke-CimMethod.*Terminate/);
 });

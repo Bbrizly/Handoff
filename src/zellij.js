@@ -29,6 +29,21 @@ export ZELLIJ_CONFIG_DIR="$hn_zellij_config_dir"
 `;
 }
 
+export function windowsZellijProcessCleanupScript(sessionName) {
+  return `
+$hnZellij = Join-Path $HOME '.hn\\bin\\zellij.exe'
+$hnSessionPattern = '[\\\\/]' + [regex]::Escape(${quotePowerShell(sessionName)}) + '(?:["'']?\\s*$)'
+$hnServers = Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -ieq 'zellij.exe' -and
+  $_.ExecutablePath -ieq $hnZellij -and
+  $_.CommandLine -match $hnSessionPattern
+}
+foreach ($hnServer in $hnServers) {
+  Invoke-CimMethod -InputObject $hnServer -MethodName Terminate -Arguments @{ Reason = 0 } | Out-Null
+}
+`;
+}
+
 export function windowsDetachedZellijLaunchScript(sessionName) {
   const safeSession = slug(sessionName).slice(0, 80) || "session";
   const childScript = `
@@ -188,7 +203,16 @@ function diagnosticText(result) {
 }
 
 export function killSession(worker, sessionName) {
-  runZellij(worker, ["kill-session", sessionName], { capture: true, allowFailure: true });
+  runZellij(worker, ["delete-session", "--force", sessionName], { capture: true, allowFailure: true });
+  if (worker.platform === "windows") {
+    runPowerShell(
+      worker,
+      windowsZellijProcessCleanupScript(sessionName),
+      { capture: true, allowFailure: true },
+    );
+  }
+  sleepMs(250);
+  runZellij(worker, ["delete-session", sessionName], { capture: true, allowFailure: true });
 }
 
 function windowsZellijLaunchLog(worker, sessionName) {

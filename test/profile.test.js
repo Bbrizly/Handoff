@@ -12,6 +12,7 @@ test("Claude portable profile includes capability files but excludes machine sta
 
   assert.ok(locals.includes(join("/Users/me", ".agents", "skills")));
   assert.ok(locals.includes(join("/Users/me", ".claude", "skills")));
+  assert.ok(locals.includes(join("/Users/me", ".codex", "superpowers", "skills")));
   assert.ok(remotes.includes(".claude/agents"));
   assert.ok(remotes.includes(".claude/hooks"));
   assert.ok(remotes.includes(".claude/CLAUDE.md"));
@@ -26,16 +27,23 @@ test("Claude profile projects only links backed by the canonical agent skill tre
   try {
     const agents = join(temp, ".agents", "skills");
     const claude = join(temp, ".claude", "skills");
+    const external = join(temp, ".codex", "superpowers", "skills");
     mkdirSync(join(agents, "shared"), { recursive: true });
     mkdirSync(join(claude, "native"), { recursive: true });
+    mkdirSync(external, { recursive: true });
     writeFileSync(join(agents, "shared", "SKILL.md"), "shared\n");
     writeFileSync(join(claude, "native", "SKILL.md"), "native\n");
     symlinkSync("../../.agents/skills/shared", join(claude, "shared"));
+    symlinkSync(external, join(agents, "superpowers"));
 
     assert.deepEqual(claudeProfileLinks([
+      { local: external, remote: ".codex/superpowers/skills" },
       { local: agents, remote: ".agents/skills" },
       { local: claude, remote: ".claude/skills" },
-    ]), [{ name: "shared", link: ".claude/skills/shared", target: ".agents/skills/shared" }]);
+    ]), [
+      { name: "superpowers", link: ".agents/skills/superpowers", target: ".codex/superpowers/skills" },
+      { name: "shared", link: ".claude/skills/shared", target: ".agents/skills/shared" },
+    ]);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

@@ -1,11 +1,22 @@
-import { existsSync, lstatSync, readdirSync, readlinkSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { runPosix, runPowerShell } from "./ssh.js";
-import { quotePosix, quotePowerShell } from "./util.js";
+import { copyToWorker, runPosix, runPowerShell } from "./ssh.js";
+import { fail, quotePosix, quotePowerShell } from "./util.js";
+import { ensureRemoteDirectory } from "./worker.js";
 import { addWorkspaceRoot } from "./workspace.js";
 
 const CLAUDE_PORTABLE_PATHS = [
+  [".codex/superpowers/skills", ".codex/superpowers/skills", "directory"],
   [".agents/skills", ".agents/skills", "directory"],
   [".claude/skills", ".claude/skills", "directory"],
   [".claude/agents", ".claude/agents", "directory"],
@@ -55,6 +66,20 @@ export function claudeProfileLinks(roots) {
   if (!agentRoot || !claudeRoot) return [];
 
   const links = [];
+  for (const entry of readdirSync(agentRoot.local, { withFileTypes: true })) {
+    const localLink = join(agentRoot.local, entry.name);
+    let target;
+    try {
+      if (!lstatSync(localLink).isSymbolicLink()) continue;
+      target = resolve(dirname(localLink), readlinkSync(localLink));
+      const targetRoot = roots.find((root) => resolve(root.local) === target);
+      if (!targetRoot || !statSync(target).isDirectory()) continue;
+      links.push({ name: entry.name, link: `${agentRoot.remote}/${entry.name}`, target: targetRoot.remote });
+    } catch {
+      continue;
+    }
+  }
+
   let entries = [];
   try {
     entries = readdirSync(claudeRoot.local, { withFileTypes: true });
@@ -79,48 +104,85 @@ export function claudeProfileLinks(roots) {
       target: targetRelative ? `${agentRoot.remote}/${targetRelative}` : agentRoot.remote,
     });
   }
-  return links.sort((a, b) => a.name.localeCompare(b.name));
+  return links.sort((a, b) => {
+    const depth = a.link.split("/").length - b.link.split("/").length;
+    return depth || a.link.localeCompare(b.link);
+  });
 }
 
 export function ensureClaudeProfileProjection(worker, roots) {
   const links = claudeProfileLinks(roots);
-  if (!links.length) return { created: 0 };
+  if (!links.length) return { created: 0, missing: 0, total: 0 };
 
   if (worker.platform === "windows") {
-    const data = quotePowerShell(JSON.stringify(links));
-    const script = `
+    const stage = mkdtempSync(join(tmpdir(), "hn-claude-profile-"));
+    const manifest = join(stage, "links.json");
+    const remoteManifest = `.hn/state/claude-profile-links-${process.pid}-${Date.now()}.json`;
+    writeFileSync(manifest, JSON.stringify(links), { mode: 0o600 });
+    try {
+      ensureRemoteDirectory(worker, ".hn/state");
+      copyToWorker(worker, manifest, remoteManifest);
+      const script = `
 $ErrorActionPreference = 'Stop'
-$links = ConvertFrom-Json ${data}
+$manifest = Join-Path $HOME ${quotePowerShell(remoteManifest.replaceAll("/", "\\"))}
 $backupRoot = Join-Path $HOME ('.hn\\backups\\claude-profile-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $created = 0
-foreach ($link in $links) {
-  $destination = Join-Path $HOME ($link.link -replace '/', '\\')
-  $target = Join-Path $HOME ($link.target -replace '/', '\\')
-  if (-not (Test-Path -LiteralPath $target -PathType Container)) { continue }
-  $item = Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
-  $correct = $item -and $item.LinkType -eq 'Junction' -and ($item.Target -contains $target)
-  if ($correct) { continue }
-  if ($item) {
-    New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
-    Move-Item -LiteralPath $destination -Destination (Join-Path $backupRoot $link.name)
+$missing = 0
+try {
+  $links = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+  foreach ($link in $links) {
+    $destination = Join-Path $HOME ($link.link -replace '/', '\\')
+    $target = Join-Path $HOME ($link.target -replace '/', '\\')
+    if (-not (Test-Path -LiteralPath $target -PathType Container)) { $missing += 1; continue }
+    $item = Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+    $correct = $item -and $item.LinkType -eq 'Junction' -and ($item.Target -contains $target)
+    if ($correct) { continue }
+    if ($item) {
+      $backupName = ([string]$link.link).Replace('/', '__').Replace('\\', '__')
+      New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+      Move-Item -LiteralPath $destination -Destination (Join-Path $backupRoot $backupName)
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+    New-Item -ItemType Junction -Path $destination -Target $target | Out-Null
+    $created += 1
   }
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-  New-Item -ItemType Junction -Path $destination -Target $target | Out-Null
-  $created += 1
+} finally {
+  Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
 }
-Write-Output $created
+Write-Output ("{0}|{1}|{2}" -f $created, $missing, @($links).Count)
 `;
-    const result = runPowerShell(worker, script, { capture: true });
-    return { created: Number.parseInt(result.stdout.trim(), 10) || 0 };
+      const result = runPowerShell(worker, script, { capture: true });
+      const [created = 0, missing = 0, total = 0] = result.stdout
+        .trim()
+        .split("|")
+        .map((value) => Number.parseInt(value, 10) || 0);
+      if (missing) {
+        fail(`Claude profile is missing ${missing} linked skill source${missing === 1 ? "" : "s"} on ${worker.target}.`);
+      }
+      return { created, missing, total };
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
   }
 
   const statements = links.map((link) => {
-    const destination = `$HOME/${link.link}`;
-    const target = `$HOME/${link.target}`;
-    return `if [ ! -e ${quotePosix(destination)} ] && [ ! -L ${quotePosix(destination)} ]; then ln -s -- ${quotePosix(target)} ${quotePosix(destination)}; fi`;
+    const destination = `"$HOME"/${quotePosix(link.link)}`;
+    const target = `"$HOME"/${quotePosix(link.target)}`;
+    return `if [ ! -d ${target} ]; then missing=$((missing + 1)); elif [ ! -e ${destination} ] && [ ! -L ${destination} ]; then mkdir -p -- "$(dirname -- ${destination})"; ln -s -- ${target} ${destination}; created=$((created + 1)); fi`;
   });
-  runPosix(worker, statements.join("\n"));
-  return { created: links.length };
+  const result = runPosix(
+    worker,
+    `created=0\nmissing=0\n${statements.join("\n")}\nprintf '%s|%s|%s' "$created" "$missing" '${links.length}'`,
+    { capture: true },
+  );
+  const [created = 0, missing = 0, total = 0] = result.stdout
+    .trim()
+    .split("|")
+    .map((value) => Number.parseInt(value, 10) || 0);
+  if (missing) {
+    fail(`Claude profile is missing ${missing} linked skill source${missing === 1 ? "" : "s"} on ${worker.target}.`);
+  }
+  return { created, missing, total };
 }
 
 export function claudeProfileRoots(workspace) {

@@ -11,7 +11,7 @@ import {
   setDefaultTarget,
   updateConfig,
 } from "./config.js";
-import { augmentAgentCommand } from "./agent.js";
+import { additionalWorkspaceDirs, augmentAgentCommand } from "./agent.js";
 import { targetAliasInvocation } from "./cli-routing.js";
 import { ensureControllerSshKey, windowsPairCommand } from "./pair.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
@@ -53,7 +53,11 @@ import {
   shellCommand,
 } from "./session.js";
 import { runInteractiveRemoteCommand, runRemoteCommand } from "./remote.js";
-import { claudeProfileRoots, enableClaudeProfile } from "./profile.js";
+import {
+  claudeProfileRoots,
+  enableClaudeProfile,
+  ensureClaudeProfileProjection,
+} from "./profile.js";
 import { fail, normalizeName } from "./util.js";
 
 const RESERVED_COMMANDS = new Set([
@@ -188,6 +192,7 @@ function ensureWorkspaceSync(context) {
     console.log(`syncing ${context.name} -> ${context.targetName}...`);
   }
   flushSyncSessions(sessions.map((session) => session.name));
+  ensureClaudeProfileProjection(context.worker, workspace.roots);
 }
 
 function syncStatusText(status) {
@@ -320,6 +325,7 @@ function syncWholeWorkspace(config, workspaceName, workspace) {
   );
   console.log(`syncing ${workspaceName} -> ${target.name}...`);
   flushSyncSessions(sessions.map((session) => session.name), { monitor: true });
+  ensureClaudeProfileProjection(worker, roots);
   console.log("sync ✓");
 }
 
@@ -373,10 +379,13 @@ function runInteractive(config, targetName, commandArgs = [], { preparedWorker =
   ensureWorkspaceSync(context);
 
   const remoteCwd = mapLocalToRemote(context.root, process.cwd());
+  const workspace = targetWorkspace(context);
   const remoteArgs = commandArgs.length
-    ? augmentAgentCommand(commandArgs, targetWorkspace(context), remoteCwd)
+    ? augmentAgentCommand(commandArgs, workspace, remoteCwd)
     : [];
-  runInteractiveRemoteCommand(worker, remoteCwd, remoteArgs);
+  runInteractiveRemoteCommand(worker, remoteCwd, remoteArgs, {
+    agentDirs: additionalWorkspaceDirs(workspace, remoteCwd),
+  });
 }
 
 async function main() {
