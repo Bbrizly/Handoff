@@ -82,11 +82,11 @@ test("real Zellij creates, controls, and kills an isolated Handoff session", { s
     const controlled = panes(binary, session, env);
     assert.ok(controlled.some((pane) => !pane.is_plugin && !pane.exited && pane.title === "hn:integration"));
 
-    run(binary, ["kill-sessions", session], { env });
+    run(binary, ["kill-session", session], { env });
     const after = run(binary, ["list-sessions"], { env, allowFailure: true });
     assert.doesNotMatch(`${after.stdout}${after.stderr}`, new RegExp(session));
   } finally {
-    run(binary, ["kill-sessions", session], { env, allowFailure: true });
+    run(binary, ["kill-session", session], { env, allowFailure: true });
     rmSync(temp, { recursive: true, force: true });
   }
 });
