@@ -26,7 +26,12 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-test("real Zellij creates, inspects, and kills an isolated Handoff session", { skip: !enabled, timeout: 120_000 }, () => {
+function panes(binary, session, env) {
+  const result = run(binary, ["--session", session, "action", "list-panes", "--json"], { env });
+  return JSON.parse(result.stdout.trim());
+}
+
+test("real Zellij creates, controls, and kills an isolated Handoff session", { skip: !enabled, timeout: 120_000 }, () => {
   const asset = zellijAssetFor(process.platform, process.arch);
   assert.ok(asset, `no Zellij integration asset for ${process.platform}/${process.arch}`);
 
@@ -60,10 +65,22 @@ test("real Zellij creates, inspects, and kills an isolated Handoff session", { s
     const listed = run(binary, ["list-sessions"], { env });
     assert.match(listed.stdout, new RegExp(session));
 
-    const panes = run(binary, ["--session", session, "action", "list-panes", "--json"], { env });
-    const parsed = JSON.parse(panes.stdout.trim());
-    assert.ok(Array.isArray(parsed));
-    assert.ok(parsed.some((pane) => !pane.is_plugin && !pane.exited));
+    const initial = panes(binary, session, env);
+    assert.ok(Array.isArray(initial));
+
+    // A headless bootstrap shell is allowed to exit immediately. Handoff's
+    // production path must still be able to create the actual persistent
+    // command pane into the live session.
+    run(binary, [
+      "--session", session,
+      "action", "new-pane",
+      "--name", "hn:integration",
+      "--",
+      "sh", "-lc", "sleep 30",
+    ], { env });
+
+    const controlled = panes(binary, session, env);
+    assert.ok(controlled.some((pane) => !pane.is_plugin && !pane.exited && pane.title === "hn:integration"));
 
     run(binary, ["kill-sessions", session], { env });
     const after = run(binary, ["list-sessions"], { env, allowFailure: true });
