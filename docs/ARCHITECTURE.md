@@ -1,0 +1,556 @@
+# Handoff architecture
+
+This document describes the accepted architecture and the current implementation shape. See `DECISIONS.md` for why each major choice was made.
+
+## 1. System overview
+
+```text
+CONTROLLER                                      WORKER
+(local daily machine)                           (compute machine)
+
+Editor / IDE                                    Claude / Codex
+Local files                                     Node / Python / compilers
+Canonical .git                                  Docker / CUDA / local AI
+Browser                                          dev servers
+      │                                              │
+      │ local paths                                  │ remote paths
+      ▼                                              ▼
+     hn ─────────────── SSH control ───────────────► worker
+      │                                              │
+      ├──────── Mutagen two-way-safe sync ──────────┤
+      │                                              │
+      └────── Mutagen TCP forwarding ◄──────────────┘
+
+Persistent commands on worker live inside Zellij sessions.
+```
+
+Handoff is deliberately a coordinator. It does not replace the editor, Git, network overlay, shell, sync engine, or session multiplexer.
+
+## 2. Controller responsibilities
+
+The controller owns:
+
+- `hn` CLI and configuration;
+- active target selection;
+- local workspace roots;
+- canonical source checkout and `.git`;
+- Mutagen binary/daemon/session control;
+- SSH command/control transport;
+- mapping local paths to remote workspace paths;
+- command augmentation for supported coding agents;
+- local endpoints for forwarded remote ports.
+
+Current configuration path:
+
+```text
+~/.hn/config.json
+```
+
+Legacy configuration:
+
+```text
+~/.handoff/config.json
+```
+
+is migrated to config version 2.
+
+Config is written with restrictive file permissions where supported.
+
+## 3. Worker responsibilities
+
+A worker provides:
+
+- SSH access;
+- platform-native shell/command environment;
+- Handoff-managed Zellij binary;
+- project/workspace mirror under the remote user's home;
+- the actual workload tools the user wants to run.
+
+Handoff does not require a worker-side Handoff daemon today.
+
+Typical remote paths:
+
+```text
+~/hn/main/GitHub
+~/hn/main/Obsidian
+~/hn/main/Downloads
+```
+
+On Windows these are interpreted relative to `$HOME` and materialized with Windows path semantics.
+
+## 4. Configuration model
+
+Canonical config shape:
+
+```json
+{
+  "version": 2,
+  "activeTarget": "pc",
+  "workers": {
+    "pc": {
+      "target": "Lenovo@100.68.238.25",
+      "host": "100.68.238.25",
+      "user": "Lenovo",
+      "port": 22,
+      "platform": "windows",
+      "arch": "x64"
+    }
+  },
+  "workspaces": {
+    "main": {
+      "roots": [
+        {
+          "local": "/Users/example/Documents/GitHub",
+          "remote": "hn/main/GitHub"
+        }
+      ]
+    }
+  }
+}
+```
+
+### 4.1 Active target is global
+
+The active target is a global local selection, not stored per workspace. This keeps switching simple:
+
+```bash
+hn pc
+hn home
+hn aws
+```
+
+### 4.2 One endpoint, one alias
+
+Two target aliases may not point to the same `(user, host, port)` endpoint. Re-adding the same alias/end-point is safe; silently repointing an existing alias to a different live machine is rejected.
+
+### 4.3 Workspace roots cannot overlap
+
+Handoff rejects local or remote root overlap across configured workspaces. Overlapping independent Mutagen sessions would create ambiguous ownership and unsafe concurrent synchronization.
+
+## 5. Context resolution
+
+For commands run from a local directory, Handoff resolves:
+
+```text
+current working directory
+      ↓
+workspace root containing it
+      ↓
+project root/context
+      ↓
+relative path inside workspace root
+      ↓
+remote working directory
+```
+
+Example:
+
+```text
+Local workspace root:
+/Users/me/Documents/GitHub
+
+Local cwd:
+/Users/me/Documents/GitHub/Handoff
+
+Remote root:
+hn/main/GitHub
+
+Remote cwd:
+hn/main/GitHub/Handoff
+```
+
+The project determines command/session identity. The workspace remains the full synchronized/access boundary.
+
+## 6. Synchronization architecture
+
+### 6.1 Engine
+
+Handoff uses Mutagen v0.18.1.
+
+The controller manages a pinned official Mutagen release and keeps the binary plus `mutagen-agents.tar.gz` together under:
+
+```text
+~/.hn/bin/mutagen-v0.18.1/
+```
+
+The release archive is verified against Mutagen's official SHA256SUMS before use.
+
+Homebrew is not part of the required setup.
+
+### 6.2 Session granularity
+
+There is one synchronization session per:
+
+```text
+workspace + target + SSH endpoint + local root + remote root
+```
+
+Session names are deterministic hashes, for example:
+
+```text
+hn-sync-b631d292
+```
+
+Handoff repairs accidental duplicate named Mutagen sessions by preserving the oldest session and terminating duplicates.
+
+### 6.3 Mode
+
+Accepted mode:
+
+```text
+two-way-safe
+```
+
+Git metadata is excluded with:
+
+```text
+--ignore-vcs
+```
+
+This means local and remote working-tree changes propagate both ways, but ambiguity becomes a conflict rather than silent data loss.
+
+### 6.4 Initial seed vs normal operation
+
+The first synchronization of a large workspace may copy many files/gigabytes. That is expected once for each workspace-root/target tuple.
+
+After the baseline exists, Mutagen's persistent session watches/reconciles changes. Starting another Claude session does not intentionally resend the entire workspace.
+
+A restart/reconnect may trigger scanning/reconciliation; scanning is not equivalent to retransferring every byte.
+
+### 6.5 Current ignore set
+
+Current code ignores:
+
+```text
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+.output/
+target/
+.gradle/
+__pycache__/
+*.pyc
+.DS_Store
+```
+
+This set is known to be incomplete. See `KNOWN_ISSUES.md`.
+
+### 6.6 Safety gate before remote work
+
+Before a persistent or remote command starts, Handoff:
+
+1. creates remote workspace directories;
+2. ensures/resumes Mutagen sessions for all workspace roots;
+3. flushes the sessions;
+4. waits for synchronization work;
+5. checks status;
+6. refuses remote work if conflicts or materially unhealthy states exist.
+
+Conflict refusal is a core invariant.
+
+### 6.7 Progress UX
+
+For a single synchronization session Handoff can invoke Mutagen's monitor output while the flush runs. The intended final UI should summarize that output rather than dump full session metadata every time.
+
+Idle healthy sync should become quiet; meaningful initial/large sync should be richly observable.
+
+## 7. Git architecture
+
+```text
+CONTROLLER                          WORKER
+
+.git         canonical             no .git
+worktree   ◄──────── sync ───────► worktree
+```
+
+The worker is intentionally not a second Git clone.
+
+Benefits:
+
+- no branch divergence between machines;
+- no push/pull just to move in-progress changes;
+- editor Git integration remains local;
+- remote agent edits appear as normal uncommitted local changes;
+- secrets/history stored in `.git` do not need synchronization.
+
+Tradeoff:
+
+Remote agents cannot directly use normal Git repository introspection unless Handoff provides a future Git bridge. Current Codex exec handling uses `--skip-git-repo-check` when needed.
+
+## 8. Agent integration architecture
+
+Handoff treats Claude and Codex as special only where necessary to preserve the workspace model.
+
+### 8.1 Additional workspace roots
+
+The command starts in the project's mapped remote cwd, but other workspace roots are supplied to supported agents.
+
+Claude:
+
+```text
+--add-dir <root> <root> ...
+```
+
+Codex:
+
+```text
+--add-dir <root> --add-dir <root> ...
+```
+
+### 8.2 Management commands
+
+Agent management commands such as auth/update/mcp/plugin commands are not augmented with workspace directories, because doing so can corrupt their CLI semantics.
+
+### 8.3 Gitless Codex
+
+For `codex exec`, Handoff adds:
+
+```text
+--skip-git-repo-check
+```
+
+unless already present.
+
+## 9. SSH architecture
+
+SSH is the control plane.
+
+Default connection behavior includes:
+
+```text
+BatchMode=yes
+ConnectTimeout=5
+ConnectionAttempts=1
+StrictHostKeyChecking=accept-new
+ServerAliveInterval=5
+ServerAliveCountMax=3
+```
+
+Supported address forms include:
+
+```text
+user@host
+user@host:port
+user@[ipv6]:port
+```
+
+Literal IPv6 is accepted by Handoff's SSH parser, but Mutagen's SCP-like endpoint syntax cannot directly encode the same literal IPv6 target. For sync, use an SSH hostname/alias or MagicDNS-style name.
+
+## 10. Windows command transport
+
+Windows uses PowerShell as Handoff's orchestration shell.
+
+### 10.1 Encoded commands
+
+Normal PowerShell payloads use UTF-16LE `-EncodedCommand` to avoid quoting corruption.
+
+### 10.2 Oversized commands
+
+Live testing exposed Windows/OpenSSH command-line limits. Large PowerShell scripts therefore need a transport that does not place the entire payload into argv. Current 0.1.x work added a fallback that streams oversized scripts over SSH stdin using PowerShell's stdin command mode.
+
+### 10.3 Application shim resolution
+
+For workload commands Handoff checks `Get-Command -CommandType Application` first. This prefers `.exe`, `.cmd`, and `.bat` shims over a `.ps1` wrapper that may be blocked by local execution policy.
+
+This is especially relevant for npm-installed tools such as Claude, Codex, and npm-related commands.
+
+## 11. Windows pairing architecture
+
+`hn worker pair` is designed to reduce Windows setup to one elevated action.
+
+The generated PowerShell bootstrap:
+
+- installs Windows OpenSSH Server if absent;
+- configures `sshd` to start automatically;
+- starts `sshd`;
+- writes the controller public key to the administrators authorized-keys path;
+- applies ACLs required by Windows OpenSSH;
+- restarts SSH as needed.
+
+`hn worker finish` then:
+
+- verifies key-based SSH;
+- detects platform and architecture;
+- removes pending-pair state;
+- bootstraps Handoff's Zellij binary;
+- saves worker metadata.
+
+Current limitation: the bootstrap assumes the paired Windows account is an administrator.
+
+## 12. Zellij architecture
+
+### 12.1 Why Zellij
+
+Zellij is the persistent session backend because it is cross-platform and has native Windows support. tmux was rejected for the core architecture because native Windows is a requirement and WSL is not.
+
+Pinned version:
+
+```text
+0.45.0
+```
+
+Handoff downloads official release artifacts, verifies pinned SHA256 hashes, and copies the binary to:
+
+```text
+Windows: $HOME\.hn\bin\zellij.exe
+POSIX:   $HOME/.hn/bin/zellij
+```
+
+### 12.2 Session identity
+
+A stable persistent command session is keyed from:
+
+```text
+workspace
++ target
++ project local path
++ command arguments
++ workspace-root mapping salt
++ optional unique token
+```
+
+This gives:
+
+```bash
+hn claude
+```
+
+one stable project/target session, while:
+
+```bash
+hn new claude
+```
+
+creates another.
+
+### 12.3 Pane lifecycle
+
+The intended lifecycle is:
+
+1. inspect existing named Zellij session;
+2. if the expected command pane is healthy, reuse it;
+3. if stale/wrong, recreate the session;
+4. replace the initial shell pane with the desired command in the mapped cwd;
+5. attach interactively over SSH TTY.
+
+### 12.4 Native Windows persistence boundary
+
+Real native-Windows testing proved a hard integration issue: `zellij attach --create-background` could return success inside an OpenSSH exec channel but no session remained after the SSH command exited.
+
+Handoff has been iterating on a Windows process-lifetime strategy that detaches Zellij creation from the short-lived SSH process/job using Win32 process creation semantics, plus a stable Handoff-owned Zellij socket directory.
+
+This path is **not yet considered fully proven** until a real Windows test demonstrates:
+
+```text
+hn claude
+→ Claude opens
+→ local terminal closes
+→ hn claude
+→ same live session reattaches
+```
+
+See `KNOWN_ISSUES.md`.
+
+## 13. Port forwarding architecture
+
+Handoff uses Mutagen forwarding rather than constructing custom SSH tunnel lifecycle management.
+
+Explicit command:
+
+```bash
+hn port <remote-port> [local-port]
+```
+
+The forwarding is loopback-to-loopback by default:
+
+```text
+controller 127.0.0.1:<local>
+            │
+         Mutagen
+            │
+worker     127.0.0.1:<remote>
+```
+
+This is safer and more predictable than exposing services on a public worker interface.
+
+## 14. Network architecture
+
+Handoff assumes reachability; it does not create it.
+
+Supported network paths include:
+
+- Tailscale;
+- LAN;
+- conventional VPN;
+- public/private SSH endpoints;
+- provider networking.
+
+Tailscale is a strong default for personal machines but is not a product dependency.
+
+## 15. Target switching
+
+Target selection is intentionally local-only.
+
+```bash
+hn pc
+```
+
+must not bootstrap, sync, or make SSH calls solely to change the active alias. Expensive validation belongs when a command actually uses the target or when explicitly requested with `hn doctor`.
+
+## 16. Managed dependency strategy
+
+### Mutagen
+
+- version: 0.18.1;
+- controller-managed;
+- official GitHub release;
+- official SHA256SUMS verified;
+- executable and agent bundle kept together.
+
+### Zellij
+
+- version: 0.45.0;
+- worker-managed by Handoff;
+- official platform-specific binaries;
+- pinned SHA256 per artifact.
+
+This reduces setup drift and makes Handoff's infrastructure behavior reproducible.
+
+## 17. Security boundaries
+
+### SSH
+
+SSH keys and host verification are the primary machine trust mechanism.
+
+### Sync
+
+Only explicitly configured workspace roots synchronize.
+
+### Git
+
+`.git` remains local through VCS ignore mode.
+
+### Ports
+
+Forwarding defaults to loopback endpoints.
+
+### AI configuration
+
+Project-local files inside a workspace may sync. User-global AI auth/cache/config trees should not be copied wholesale by Handoff.
+
+## 18. Architecture invariants
+
+The following should be treated as hard invariants unless an explicit ADR supersedes them:
+
+1. The local machine remains the developer's primary environment.
+2. Workers are addressed through ordinary SSH.
+3. A workspace is not bound to one worker.
+4. `.git` is controller-only.
+5. Workspace synchronization is bidirectional and safe-by-default.
+6. Project context determines command location/session identity but not a narrower implicit sync boundary.
+7. Native Windows is supported without WSL.
+8. Persistent interactive work must survive controller-terminal disconnects.
+9. Handoff does not require its own hosted backend.
+10. Network overlay/provider concerns remain separable from core execution.
