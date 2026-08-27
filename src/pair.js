@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { fail } from "./util.js";
 
 const SSH_DIR = join(homedir(), ".ssh");
 const DEFAULT_KEYS = ["id_ed25519", "id_rsa", "id_ecdsa"];
+const WINDOWS_BOOTSTRAP_PATH = fileURLToPath(new URL("../scripts/windows-bootstrap.ps1", import.meta.url));
 
 function usableKey(base) {
   return existsSync(base) && existsSync(`${base}.pub`);
@@ -37,7 +39,10 @@ export function ensureControllerSshKey() {
 }
 
 export function windowsPairCommand(publicKey) {
+  // Pairing is intentionally self-contained: the elevated Windows shell executes
+  // the bootstrap bundled with this exact hn install, never mutable GitHub main.
   const encodedKey = Buffer.from(String(publicKey).trim(), "utf8").toString("base64");
-  const scriptUrl = "https://raw.githubusercontent.com/Bbrizly/Handoff/main/scripts/windows-bootstrap.ps1";
-  return `$k=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedKey}')); $s=irm '${scriptUrl}'; & ([ScriptBlock]::Create($s)) -PublicKey $k`;
+  const bootstrap = readFileSync(WINDOWS_BOOTSTRAP_PATH, "utf8");
+  const encodedBootstrap = Buffer.from(bootstrap, "utf8").toString("base64");
+  return `$k=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedKey}')); $s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedBootstrap}')); & ([ScriptBlock]::Create($s)) -PublicKey $k`;
 }
