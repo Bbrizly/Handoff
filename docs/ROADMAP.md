@@ -1,0 +1,334 @@
+# Handoff roadmap
+
+This roadmap is ordered by product risk, not by feature excitement. The core promise is not complete until the boring daily path works reliably on a real native-Windows worker.
+
+## Phase 0 — Preserve the product contract
+
+**Status:** Done with this documentation set
+
+- canonical PRD;
+- architecture specification;
+- decision ledger;
+- CLI contract;
+- known-issues record;
+- roadmap;
+- README links.
+
+Goal: no future engineer/agent should need chat history to know what Handoff is or which alternatives were already rejected.
+
+---
+
+## Phase 1 — Make the real workspace healthy
+
+**Priority:** Immediate
+
+The current reference workspace is blocked by problems that Handoff correctly surfaces but does not yet handle ergonomically.
+
+### 1.1 Fix default generated-output ignores
+
+At minimum evaluate/add:
+
+```text
+bin/
+obj/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.turbo/
+```
+
+Acceptance:
+
+- generated .NET `obj/...dll` no longer participates in sync;
+- common machine-specific virtual environments/caches do not cross platforms;
+- legitimate source/assets remain synchronized.
+
+### 1.2 Handle generated Claude worktrees/symlink trees
+
+Investigate the real `.claude/.agents/skills/gstack` and `.claude/worktrees` layout.
+
+Acceptance:
+
+- project instructions/skills needed by remote Claude still synchronize;
+- generated absolute symlink failures are removed or explicitly diagnosed;
+- no blanket `.claude/` ignore.
+
+### 1.3 Surface Windows-incompatible paths
+
+Add a preflight/diagnostic path for Windows target filenames that cannot materialize.
+
+Acceptance:
+
+- exact file shown;
+- exact invalid character/reason shown;
+- safe remedy described;
+- no silent rename.
+
+### 1.4 Improve status/problem output
+
+Acceptance:
+
+```text
+hn status
+```
+
+can show actual problem paths or direct the user to a first-class command that does.
+
+---
+
+## Phase 2 — Prove persistent native-Windows sessions
+
+**Priority:** Immediate blocker
+
+The remote execution path is proven; Zellij persistence is not yet end-to-end proven after the latest Windows process-lifetime and PowerShell-transport fixes.
+
+### Smoke test
+
+```bash
+cd <project>
+hn claude
+```
+
+Acceptance:
+
+1. Claude opens and is running on Windows.
+2. Session appears in `hn sessions`.
+3. Local terminal can be closed.
+4. Claude process/session remains alive remotely.
+5. A new local terminal running `hn claude` reattaches the same session.
+6. `hn new claude` creates an independent second session.
+7. Exiting Claude intentionally is recognized and the next invocation creates a clean replacement.
+
+### If still failing
+
+Debug the real Windows process/session boundary with evidence from:
+
+- Zellij creation log;
+- `list-sessions`;
+- process ownership/lifetime;
+- stable socket directory;
+- OpenSSH job/process behavior.
+
+Do not switch the architecture to WSL/tmux as an unexamined workaround.
+
+---
+
+## Phase 3 — Prove round-trip editing
+
+**Priority:** Immediate after persistent session
+
+### Worker → controller
+
+Have Claude/remote command create/edit a source file.
+
+Acceptance:
+
+- edit appears locally quickly;
+- local Git sees it as a normal modification;
+- no remote `.git` exists.
+
+### Controller → worker
+
+Edit locally in the normal editor while Claude/session is alive.
+
+Acceptance:
+
+- change reaches worker quickly;
+- remote command observes it without restart;
+- no manual push/pull/sync ceremony.
+
+### Disconnect/reconnect
+
+Acceptance:
+
+- temporary SSH/network loss does not corrupt the workspace;
+- Mutagen resumes/reconciles safely;
+- Handoff reports unhealthy state rather than starting work blindly.
+
+---
+
+## Phase 4 — Make synchronization UX production-quality
+
+### 4.1 Quiet healthy path
+
+If no meaningful sync work is required:
+
+```text
+hn claude
+```
+
+should not dump full Mutagen session metadata.
+
+### 4.2 Rich slow path
+
+For large transfer/reconciliation show:
+
+- workspace/target;
+- root;
+- files and bytes;
+- percentage if available;
+- current phase/file;
+- conflicts/problems immediately.
+
+### 4.3 First-class problem commands
+
+Candidate surface:
+
+```bash
+hn conflicts
+hn sync doctor
+hn resolve <path> --local
+hn resolve <path> --remote
+```
+
+Use local/remote terminology in user-facing UX, not Mutagen alpha/beta.
+
+---
+
+## Phase 5 — Dev server flow
+
+Prove:
+
+```bash
+hn npm run dev
+hn port 5173
+```
+
+Acceptance:
+
+- server process persists in the expected project session;
+- controller browser reaches localhost;
+- forwarding resumes/reuses deterministic Mutagen forwarding session;
+- user does not manually run SSH tunnel commands.
+
+Automatic port discovery remains deferred until this explicit path is solid.
+
+---
+
+## Phase 6 — Workspace lifecycle completeness
+
+Add safe management for:
+
+```bash
+hn workspace remove ...
+hn workspace delete ...
+```
+
+Acceptance:
+
+- matching Mutagen sessions are identified;
+- sessions are terminated before endpoint cleanup/reconfiguration;
+- no deletion propagates accidentally through a live old session;
+- root overlap invariants remain enforced.
+
+Also add explicit session cleanup/repair commands if necessary.
+
+---
+
+## Phase 7 — Worker setup polish
+
+Potential command:
+
+```bash
+hn worker setup pc
+```
+
+Responsibilities may include:
+
+- infrastructure diagnostics;
+- optional install guidance/automation for Node/Claude/Codex;
+- tool version visibility;
+- account/auth launch flows without taking ownership of credentials;
+- disk/GPU/runtime diagnostics where relevant.
+
+Keep Handoff-managed infrastructure (SSH/Zellij) separate from user workload/toolchain ownership.
+
+---
+
+## Phase 8 — Agent capability bridge
+
+### Local Git bridge
+
+Expose selected controller Git capabilities to remote agents without synchronizing `.git`.
+
+Potential capabilities:
+
+- status;
+- diff;
+- branch name;
+- history/log;
+- explicitly approved Git operations.
+
+Must preserve controller Git as canonical.
+
+### MCP/browser bridge
+
+Allow remote Claude/Codex to access explicitly selected controller-local MCP/browser capabilities.
+
+Do not copy global auth/cache directories as a shortcut.
+
+---
+
+## Phase 9 — Cloud/provider integrations
+
+Add optional provisioning/discovery for AWS or other providers.
+
+Core rule:
+
+> provider integration should ultimately produce/manage an ordinary Handoff SSH worker.
+
+Potential features:
+
+- create/start/stop instance;
+- discover IP/hostname;
+- add target automatically;
+- cost/status display;
+- GPU instance templates.
+
+Do not fork execution/sync/session semantics per provider unless absolutely necessary.
+
+---
+
+## Phase 10 — Advanced convenience
+
+Only after the core path is boring:
+
+- automatic port discovery;
+- smarter project/session dashboards;
+- optional tray/menu UI;
+- richer worker health/performance metrics;
+- project presets/tool profiles;
+- optional encrypted secret handoff where explicitly needed;
+- team/shared-worker workflows if product direction expands.
+
+---
+
+## Definition of v1
+
+Handoff v1 is ready when this feels normal:
+
+```bash
+cd ~/Documents/GitHub/Handoff
+hn pc
+hn claude
+```
+
+and the user can forget the Lenovo exists as a separate interactive machine.
+
+Required v1 proof:
+
+- native Windows without WSL;
+- healthy persistent full-workspace sync;
+- incremental diffs after first seed;
+- safe conflicts;
+- persistent Claude/Codex sessions;
+- close/reopen reattach;
+- round-trip edits;
+- one-shot `hn exec`;
+- manual `hn port`;
+- clear doctor/status/errors;
+- reproducible Handoff-managed Mutagen/Zellij bootstrap;
+- no remote `.git`;
+- no Handoff-hosted backend required.
