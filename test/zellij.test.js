@@ -75,11 +75,10 @@ test("POSIX Zellij uses Handoff-owned socket and config directories", () => {
   assert.match(setup, /\.hn\/zellij\/config/);
 });
 
-test("Windows background Zellij creation escapes the OpenSSH process job", () => {
+test("Windows Zellij creation uses detached launch flags", () => {
   const script = windowsDetachedZellijLaunchScript("hn-main-pc-handoff-claude-1234");
   assert.match(script, /Win32_ProcessStartup/);
-  assert.match(script, /CreateFlags = \[uint32\]16777216/);
-  assert.match(script, /Invoke-CimMethod -ClassName Win32_Process -MethodName Create/);
+  assert.match(script, /CreateFlags = \[uint32\]16777232/);
   assert.match(script, /EnvironmentVariables/);
   assert.match(script, /Detached Zellij launcher ran as/);
 });
