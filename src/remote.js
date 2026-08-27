@@ -1,4 +1,4 @@
-import { runPosix, runPowerShell } from "./ssh.js";
+import { encodePowerShell, runPosix, runPowerShell, runSsh } from "./ssh.js";
 import { remotePathExpression } from "./worker.js";
 import { quotePosix, quotePowerShell } from "./util.js";
 
@@ -26,6 +26,48 @@ if ($application) {
 }
 exit $LASTEXITCODE
 `;
+}
+
+function windowsInteractiveShellSetup() {
+  return `
+foreach ($hnCommandName in @('claude', 'codex', 'cursor')) {
+  $hnResolvedCommand = Get-Command $hnCommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($hnResolvedCommand -and $hnResolvedCommand.CommandType -eq 'ExternalScript') {
+    $hnApplication = Get-Command $hnCommandName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($hnApplication) {
+      Set-Alias -Name $hnCommandName -Value $hnApplication.Source -Scope Global
+    }
+  }
+}
+Remove-Variable hnCommandName, hnResolvedCommand, hnApplication -ErrorAction SilentlyContinue
+`;
+}
+
+export function interactivePowerShellArgs(remoteCwd, commandArgs = []) {
+  const script = commandArgs.length
+    ? `$ErrorActionPreference = 'Stop'\nSet-Location ${remotePathExpression(remoteCwd)}\n${windowsInvocation(commandArgs[0], commandArgs.slice(1))}`
+    : `${windowsInteractiveShellSetup()}\nSet-Location ${remotePathExpression(remoteCwd)}`;
+  return [
+    "powershell.exe",
+    "-NoLogo",
+    ...(commandArgs.length ? [] : ["-NoExit"]),
+    "-EncodedCommand",
+    encodePowerShell(script),
+  ];
+}
+
+export function interactivePosixScript(remoteCwd, commandArgs = []) {
+  const command = commandArgs.length
+    ? commandArgs.map(quotePosix).join(" ")
+    : '"${SHELL:-sh}" -l';
+  return `${posixCwdSetup(remoteCwd)}\nexec ${command}`;
+}
+
+export function runInteractiveRemoteCommand(worker, remoteCwd, commandArgs = []) {
+  if (worker.platform === "windows") {
+    return runSsh(worker, interactivePowerShellArgs(remoteCwd, commandArgs), { tty: true });
+  }
+  return runPosix(worker, interactivePosixScript(remoteCwd, commandArgs), { tty: true });
 }
 
 export function runRemoteCommand(worker, remoteCwd, commandArgs) {
