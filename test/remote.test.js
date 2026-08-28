@@ -35,7 +35,7 @@ test("interactive Windows shell wraps agents with every auxiliary workspace dire
   const args = remote.interactivePowerShellArgs(
     "hn/main/GitHub/Handoff",
     [],
-    { agentDirs: ["../../Obsidian", "../../files"] },
+    { agentDirs: ["../../Obsidian", "../../files"], claudeSettings: "__HN_CLAUDE_SETTINGS__" },
   );
   const script = decodedPowerShell(args);
 
@@ -46,6 +46,9 @@ test("interactive Windows shell wraps agents with every auxiliary workspace dire
   assert.match(script, /\.\.\/\.\.\/Obsidian/);
   assert.match(script, /\.\.\/\.\.\/files/);
   assert.match(script, /--add-dir/);
+  assert.match(script, /hnClaudeSettings/);
+  assert.match(script, /--settings/);
+  assert.match(script, /claude-settings\.json/);
   assert.ok(args[args.indexOf("-EncodedCommand") + 1].length <= 6000);
 });
 

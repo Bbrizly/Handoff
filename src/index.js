@@ -11,7 +11,7 @@ import {
   setDefaultTarget,
   updateConfig,
 } from "./config.js";
-import { additionalWorkspaceDirs, augmentAgentCommand } from "./agent.js";
+import { additionalWorkspaceDirs, augmentAgentCommand, isClaudeWorkCommand } from "./agent.js";
 import { isPersistFlag, parseModeArgs, parseTargetInvocation } from "./cli-routing.js";
 import { ensureControllerSshKey, windowsPairCommand } from "./pair.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
@@ -37,10 +37,12 @@ import {
   prepareWorkerCore,
 } from "./worker.js";
 import {
+  assertHealthySync,
   ensureForward,
   ensureSyncRoot,
   flushSyncSessions,
   getSyncStatus,
+  getSyncProblems,
   isSyncBackendInstalled,
   listForwards,
   listSyncSessions,
@@ -48,7 +50,7 @@ import {
   stopSyncSession,
   syncSessionName,
 } from "./sync.js";
-import { findContext, mapLocalToRemote, tryFindContext } from "./resolve.js";
+import { findContext, mapLocalToRemote, normalizeLocalPath, tryFindContext } from "./resolve.js";
 import {
   HERDR_VERSION,
   attachHerdr,
@@ -57,6 +59,7 @@ import {
   ensureHerdrServer,
   herdrRuntimeName,
   herdrVersion,
+  probeHerdrDesk,
   runInHerdrProject,
 } from "./herdr.js";
 import {
@@ -70,11 +73,23 @@ import {
 } from "./session.js";
 import { runInteractiveRemoteCommand, runRemoteCommand } from "./remote.js";
 import {
+  claudeProfileLinks,
   claudeProfileRoots,
+  claudeProfileProjectionFingerprint,
   enableClaudeProfile,
   ensureClaudeProfileProjection,
 } from "./profile.js";
 import { fail, normalizeName } from "./util.js";
+import { syncPolicyFingerprint } from "./sync-policy.js";
+import { terminateRootSyncSessions } from "./lifecycle.js";
+import {
+  HANDOFF_STATUSLINE_VERSION,
+  ensureHandoffStatusline,
+  handoffClaudeSettingsArgument,
+  managedAssetGuardScript,
+  managedAssetsNeedRepair,
+  managedExpectation,
+} from "./statusline.js";
 
 const RESERVED_COMMANDS = new Set([
   "help", "status", "doctor", "worker", "workspace", "sync", "sessions", "attach",
@@ -154,6 +169,10 @@ function persistWorkerMetadata(config, name, worker) {
     || previous.arch !== worker.arch
     || previous.pending !== worker.pending
     || previous.trust !== worker.trust
+    || previous.handoffStatuslineVersion !== worker.handoffStatuslineVersion
+    || previous.claudeProfileProjection !== worker.claudeProfileProjection
+    || previous.profileSyncPolicyFingerprint !== worker.profileSyncPolicyFingerprint
+    || previous.herdrVersion !== worker.herdrVersion
   ) {
     updateConfig(config, (latest) => {
       const current = requireWorker(latest, name);
@@ -161,6 +180,50 @@ function persistWorkerMetadata(config, name, worker) {
     });
   }
   return config.workers[name] ?? worker;
+}
+
+function prepareClaudeExperience(config, targetName, worker, { force = false } = {}) {
+  const prepared = ensureHandoffStatusline(worker, { force });
+  return persistWorkerMetadata(config, targetName, prepared);
+}
+
+// The cached versions make the normal launch fast by assuming the worker still
+// looks the way it did. When a launch reports otherwise, put the managed files
+// back and let the caller try again once.
+function repairManagedAssets(config, context, roots) {
+  console.log("worker is missing Handoff's managed Claude files; restoring...");
+  const worker = prepareClaudeExperience(config, context.targetName, context.worker, { force: true });
+  return ensureProfileProjection(config, context.targetName, worker, roots, { force: true });
+}
+
+function ensureProfileProjection(config, targetName, worker, roots, { force = false } = {}) {
+  const fingerprint = claudeProfileProjectionFingerprint(roots);
+  if (!force && worker.claudeProfileProjection === fingerprint) return worker;
+  ensureClaudeProfileProjection(worker, roots);
+  return persistWorkerMetadata(config, targetName, { ...worker, claudeProfileProjection: fingerprint });
+}
+
+function refreshProfileSyncPolicy(config, context, roots, records) {
+  const profileRoots = roots.filter((root) => root.purpose === "claude-profile");
+  if (!profileRoots.length) return { worker: context.worker, records };
+  const fingerprint = syncPolicyFingerprint(profileRoots, context.worker);
+  if (context.worker.profileSyncPolicyFingerprint === fingerprint) {
+    return { worker: context.worker, records };
+  }
+
+  const staleNames = new Set(profileRoots.map((root) =>
+    syncSessionName(context.name, context.targetName, context.worker, root)));
+  for (const record of records) {
+    if (staleNames.has(record.name)) stopSyncSession(record.identifier);
+  }
+  const worker = persistWorkerMetadata(config, context.targetName, {
+    ...context.worker,
+    profileSyncPolicyFingerprint: fingerprint,
+  });
+  return {
+    worker,
+    records: records.filter((record) => !staleNames.has(record.name)),
+  };
 }
 
 function prepareTarget(config, name, { quiet = true, persistence = false } = {}) {
@@ -200,18 +263,35 @@ function requireWorkspacePermission(context) {
   );
 }
 
-function ensureWorkspaceSync(context) {
+function ensureWorkspaceSync(config, context) {
   requireWorkspacePermission(context);
   const workspace = targetWorkspace(context);
-  ensureRemoteDirectories(context.worker, workspace.roots.map(remoteRootDirectory));
+  let knownRecords = isSyncBackendInstalled() ? listSyncSessions() : [];
+  ({ worker: context.worker, records: knownRecords } = refreshProfileSyncPolicy(
+    config,
+    context,
+    workspace.roots,
+    knownRecords,
+  ));
+  const knownNames = new Set(knownRecords.map((record) => record.name));
+  const missingRoots = workspace.roots.filter((root) => !knownNames.has(
+    syncSessionName(context.name, context.targetName, context.worker, root),
+  ));
+  ensureRemoteDirectories(context.worker, missingRoots.map(remoteRootDirectory));
   const sessions = workspace.roots.map((root) =>
-    ensureSyncRoot(context.name, context.targetName, context.worker, root),
+    ensureSyncRoot(context.name, context.targetName, context.worker, root, { knownRecords }),
   );
   if (sessions.some((session) => session.created)) {
     console.log(`syncing ${context.name} -> ${context.targetName}...`);
   }
   flushSyncSessions(sessions.map((session) => session.name));
-  ensureClaudeProfileProjection(context.worker, workspace.roots);
+  context.worker = ensureProfileProjection(
+    config,
+    context.targetName,
+    context.worker,
+    workspace.roots,
+    { force: sessions.some((session) => session.created) },
+  );
 }
 
 function syncStatusText(status) {
@@ -221,6 +301,10 @@ function syncStatusText(status) {
   if (["scanning", "staging", "reconciling", "saving"].some((value) => status.state.includes(value))) return "…";
   if (status.state.includes("disconnected") || status.state.includes("halted") || status.state === "error") return "✗";
   return status.state || "?";
+}
+
+function syncRootLabel(root) {
+  return root.purpose === "claude-profile" ? `~/${root.remote}` : basename(root.local);
 }
 
 function printStatus(config, workspaceName = undefined) {
@@ -260,7 +344,9 @@ function printStatus(config, workspaceName = undefined) {
     }
     const session = syncSessionName(resolvedWorkspaceName, targetName, worker, root);
     const status = getSyncStatus(session);
-    console.log(`sync       ${syncStatusText(status)}  ${basename(root.local)}`);
+    console.log(`sync       ${syncStatusText(status)}  ${syncRootLabel(root)}`);
+    if (status.error) console.log(`           ${status.error}`);
+    if (status.advice) console.log(`           ${status.advice}`);
   }
 }
 
@@ -270,16 +356,74 @@ function workerChecks(worker) {
   return checks;
 }
 
-function printWorkerChecks(name, checks, trust) {
+function healthyStatus(status) {
+  return status.conflicts === 0 && status.problemCount === 0 && status.state.includes("watching");
+}
+
+function checkLine(state, label, detail = "") {
+  const symbol = state === true ? "✓" : state === false ? "✗" : "—";
+  return `  ${symbol} ${label}${detail ? `  ${detail}` : ""}`;
+}
+
+function printWorkerChecks(config, name, checks, worker) {
+  const trust = worker.trust ?? "trusted";
   console.log(`${name}  ${checks.platform}/${checks.arch}  ${trust}`);
-  for (const key of ["ssh", "claude", "codex", "node"]) {
-    console.log(`  ${checks[key] ? "✓" : "✗"} ${key}`);
+  const context = tryFindContext(config, process.cwd());
+  const workspace = context?.workspace ?? null;
+  const roots = workspace ? workspaceRootsForTarget(workspace, worker) : [];
+  const rootStatuses = roots.map((root) => ({
+    root,
+    status: getSyncStatus(syncSessionName(context.name, name, worker, root)),
+  }));
+  const profile = rootStatuses.filter(({ root }) => root.purpose === "claude-profile");
+  const workspaceAllowed = workspace && workspaceAllowsTarget(workspace, name, worker);
+  const syncHealthy = rootStatuses.length > 0 && rootStatuses.every(({ status }) => healthyStatus(status));
+  const profileHealthy = profile.length > 0 && profile.every(({ status }) => healthyStatus(status));
+  const projectionCurrent = workspace
+    ? worker.claudeProfileProjection === claudeProfileProjectionFingerprint(roots)
+    : false;
+
+  console.log("\ncore");
+  console.log(checkLine(checks.ssh, "ssh"));
+  console.log(checkLine(
+    workspaceAllowed ? true : workspace ? false : null,
+    "workspace",
+    workspace ? `${context.name} (${roots.length} roots)` : "run inside a configured workspace",
+  ));
+  console.log(checkLine(syncHealthy ? true : rootStatuses.length ? false : null, "sync"));
+  console.log(checkLine(isSyncBackendInstalled(), "sync engine", "controller"));
+  console.log(checkLine(checks.persistence ? true : null, "persistence", checks.persistence
+    ? `Herdr ${HERDR_VERSION}`
+    : "installs on first -p"));
+
+  console.log("\nai");
+  console.log(checkLine(checks.claude, "claude"));
+  console.log(checkLine(checks.claude ? checks.claudeAuth : false, "claude auth", "plausibility check"));
+  console.log(checkLine(checks.codex, "codex"));
+  console.log(checkLine(checks.node, "node"));
+  // Synchronized is all this proves. Whether a given skill or agent file is
+  // valid is the agent's own check, not Handoff's.
+  console.log(checkLine(profile.length ? profileHealthy && projectionCurrent : null, "profile", profile.length
+    ? `${profile.length} roots synchronized${projectionCurrent ? "" : "; projection refresh needed"}`
+    : "not enabled"));
+  const statuslineActive = checks.statusline
+    && worker.handoffStatuslineVersion === HANDOFF_STATUSLINE_VERSION;
+  console.log(checkLine(statuslineActive, "statusline", "Handoff launches only"));
+
+  console.log("\noptional");
+  console.log(checkLine(checks.chrome ? true : null, "chrome", checks.chrome ? "installed" : "not found"));
+  console.log(checkLine(null, "chrome extension", "worker-local; verify with claude --chrome"));
+  const mcp = checks.mcp ?? { available: false, reason: "not checked", servers: [] };
+  const failed = mcp.servers.filter((server) => !server.ok);
+  if (!mcp.available) {
+    console.log(checkLine(null, "mcp", mcp.reason));
+  } else if (!mcp.servers.length) {
+    console.log(checkLine(null, "mcp", "claude mcp list: none configured"));
+  } else if (failed.length) {
+    console.log(checkLine(false, "mcp", `claude mcp list: ${failed.length}/${mcp.servers.length} not connected: ${failed.map((server) => server.name).join(", ")}`));
+  } else {
+    console.log(checkLine(true, "mcp", `claude mcp list: ${mcp.servers.length}/${mcp.servers.length} connected`));
   }
-  // Persistence is optional. Missing is not unhealthy, it just means no '-p' yet.
-  console.log(checks.persistence
-    ? `  ✓ persistence  (Herdr ${HERDR_VERSION})`
-    : "  — persistence  (installs on first 'hn <target> -p')");
-  console.log(`  ${isSyncBackendInstalled() ? "✓" : "✗"} mutagen (controller)`);
 }
 
 function selectTarget(config, nameInput, { quiet = false } = {}) {
@@ -344,18 +488,70 @@ function addTarget(config, nameInput, targetInput) {
 
 function syncWholeWorkspace(config, workspaceName, workspace) {
   const target = targetFor(config);
-  const worker = prepareTarget(config, target.name);
+  let worker = prepareTarget(config, target.name);
   const context = { name: workspaceName, workspace, targetName: target.name, worker };
   requireWorkspacePermission(context);
   const roots = workspaceRootsForTarget(workspace, worker);
-  ensureRemoteDirectories(worker, roots.map(remoteRootDirectory));
-  const sessions = roots.map((root) =>
-    ensureSyncRoot(workspaceName, target.name, worker, root),
-  );
-  console.log(`syncing ${workspaceName} -> ${target.name}...`);
-  flushSyncSessions(sessions.map((session) => session.name), { monitor: true });
-  ensureClaudeProfileProjection(worker, roots);
-  console.log("sync ✓");
+  let knownRecords = isSyncBackendInstalled() ? listSyncSessions() : [];
+  ({ worker, records: knownRecords } = refreshProfileSyncPolicy(config, context, roots, knownRecords));
+  context.worker = worker;
+  const knownNames = new Set(knownRecords.map((record) => record.name));
+  const missingRoots = roots.filter((root) => !knownNames.has(
+    syncSessionName(workspaceName, target.name, worker, root),
+  ));
+  ensureRemoteDirectories(worker, missingRoots.map(remoteRootDirectory));
+  const sessions = roots.map((root) => ({
+    root,
+    session: ensureSyncRoot(workspaceName, target.name, worker, root, { knownRecords }),
+  }));
+  const statuses = sessions.map(({ root, session }) => ({
+    root,
+    session,
+    status: getSyncStatus(session.name),
+  }));
+  const meaningful = statuses.filter(({ session, status }) => session.created || !healthyStatus(status));
+  if (meaningful.length) {
+    console.log(`${workspaceName} -> ${target.name}`);
+    for (const { root, status } of meaningful) {
+      console.log(`  ${syncRootLabel(root)}  ${syncStatusText(status)}`);
+    }
+  }
+  for (const { root, session, status } of statuses) {
+    try {
+      // Do this before Mutagen's blocking flush. A denied root otherwise sits
+      // on its retry interval with no actionable output.
+      assertHealthySync(session.name, status);
+    } catch (error) {
+      fail(`${syncRootLabel(root)}: ${error.message}`);
+    }
+  }
+  flushSyncSessions(sessions.map(({ session }) => session.name));
+  ensureProfileProjection(config, target.name, worker, roots, {
+    force: sessions.some(({ session }) => session.created),
+  });
+  console.log(`✓ ${workspaceName} synced`);
+}
+
+function printSyncDoctor(config, workspaceName) {
+  const workspace = requireWorkspace(config, workspaceName);
+  const target = targetFor(config);
+  const worker = requireWorker(config, target.name);
+  const roots = workspaceRootsForTarget(workspace, worker);
+  let issues = 0;
+  for (const root of roots) {
+    const session = syncSessionName(workspaceName, target.name, worker, root);
+    const status = getSyncStatus(session);
+    const problems = status.problems ?? getSyncProblems(session);
+    if (healthyStatus(status) && !problems.length) continue;
+    issues += 1;
+    console.log(`${syncRootLabel(root)}  ${syncStatusText(status)}`);
+    if (status.error) console.log(`  error  ${status.error}`);
+    for (const problem of problems) {
+      console.log(`  ${problem.type}  ${problem.path || "(root)"}${problem.error ? ` — ${problem.error}` : ""}`);
+    }
+    if (status.advice) console.log(`  fix    ${status.advice}`);
+  }
+  if (!issues) console.log(`✓ ${workspaceName} sync healthy`);
 }
 
 function printRecords(records, emptyText) {
@@ -386,7 +582,7 @@ function runPersistent(config, commandArgs, { unique = false, preparedWorker = n
   if (targetName) context = { ...context, targetName, worker: requireWorker(config, targetName) };
   const worker = preparedWorker ?? prepareTarget(config, context.targetName, { persistence: true });
   context = { ...context, worker };
-  ensureWorkspaceSync(context);
+  ensureWorkspaceSync(config, context);
 
   const remoteCwd = mapLocalToRemote(context.root, process.cwd());
   const remoteArgs = augmentAgentCommand(commandArgs, targetWorkspace(context), remoteCwd);
@@ -406,13 +602,34 @@ function runPersistent(config, commandArgs, { unique = false, preparedWorker = n
 // project per synchronized Git project. The runtime installs on first use.
 function runPersistentDesk(config, targetName, commandArgs = []) {
   let context = findContext(config, process.cwd());
-  const worker = prepareTarget(config, targetName);
+  let worker = prepareTarget(config, targetName);
+  if (isClaudeWorkCommand(commandArgs)) worker = prepareClaudeExperience(config, targetName, worker);
   context = { ...context, targetName, worker };
-  ensureWorkspaceSync(context);
+  ensureWorkspaceSync(config, context);
+  worker = context.worker;
 
-  ensureHerdrInstalled(worker, { quiet: false });
+  if (worker.herdrVersion !== HERDR_VERSION) {
+    ensureHerdrInstalled(worker, { quiet: false });
+    worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
+    context = { ...context, worker };
+  }
   const runtime = herdrRuntimeName(config.controllerId, context.name);
-  ensureHerdrServer(worker, runtime);
+
+  // The desk probe has to happen anyway, so it carries the managed-file check.
+  const roots = targetWorkspace(context).roots;
+  const probe = probeHerdrDesk(worker, runtime, managedGuard(context, roots));
+  if (probe.repairNeeded) {
+    worker = repairManagedAssets(config, context, roots);
+    context = { ...context, worker };
+  }
+  // A cached herdrVersion is only a claim about the worker. The probe is the
+  // fact, so a binary that went missing gets put back before the desk starts.
+  if (!probe.installed) {
+    ensureHerdrInstalled(worker, { quiet: false });
+    worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
+    context = { ...context, worker };
+  }
+  if (!probe.running) ensureHerdrServer(worker, runtime);
 
   // Project-scoped, not cwd-scoped. An existing desk keeps the directory it has.
   const remoteRoot = mapLocalToRemote(context.root, context.projectLocal);
@@ -423,24 +640,56 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
   if (project.created) {
     console.log(`desk ready. click a project or agent in the sidebar; 'hn ${targetName} -p' comes back here`);
   }
-  if (commandArgs.length) runInHerdrProject(worker, runtime, project.workspaceId, commandArgs);
-  attachHerdr(worker, runtime);
+  if (commandArgs.length) {
+    const remoteArgs = augmentAgentCommand(
+      commandArgs,
+      targetWorkspace(context),
+      remoteRoot,
+      { claudeSettings: handoffClaudeSettingsArgument() },
+    );
+    runInHerdrProject(worker, runtime, project.workspaceId, remoteArgs);
+  }
+  const attached = attachHerdr(worker, runtime);
+  if (attached.desk === "detached") {
+    console.log(`desk still running on ${targetName}. 'hn ${targetName} -p' comes back to it`);
+  }
+}
+
+// Covers only what Handoff itself put on the worker. Sync owns the rest.
+function managedExpectationFor(roots) {
+  const profileRoots = roots.filter((root) => root.purpose === "claude-profile");
+  return managedExpectation(profileRoots.length ? claudeProfileLinks(profileRoots) : []);
+}
+
+function managedGuard(context, roots) {
+  return managedAssetGuardScript(context.worker, managedExpectationFor(roots));
 }
 
 function runInteractive(config, targetName, commandArgs = [], { preparedWorker = null } = {}) {
   let context = findContext(config, process.cwd());
-  const worker = preparedWorker ?? prepareTarget(config, targetName);
+  let worker = preparedWorker ?? prepareTarget(config, targetName);
+  const managed = !commandArgs.length || isClaudeWorkCommand(commandArgs);
+  if (managed) worker = prepareClaudeExperience(config, targetName, worker);
   context = { ...context, targetName, worker };
-  ensureWorkspaceSync(context);
+  ensureWorkspaceSync(config, context);
+  worker = context.worker;
 
   const remoteCwd = mapLocalToRemote(context.root, process.cwd());
   const workspace = targetWorkspace(context);
   const remoteArgs = commandArgs.length
-    ? augmentAgentCommand(commandArgs, workspace, remoteCwd)
+    ? augmentAgentCommand(commandArgs, workspace, remoteCwd, {
+      claudeSettings: handoffClaudeSettingsArgument(),
+    })
     : [];
-  runInteractiveRemoteCommand(worker, remoteCwd, remoteArgs, {
+  if (managed && managedAssetsNeedRepair(worker, managedExpectationFor(workspace.roots))) {
+    worker = repairManagedAssets(config, context, workspace.roots);
+  }
+  const result = runInteractiveRemoteCommand(worker, remoteCwd, remoteArgs, {
     agentDirs: additionalWorkspaceDirs(workspace, remoteCwd),
+    claudeSettings: handoffClaudeSettingsArgument(),
   });
+  // The remote program's exit code is the user's answer, not a Handoff error.
+  if (result.code) process.exitCode = result.code;
 }
 
 async function main() {
@@ -546,19 +795,13 @@ async function main() {
         console.log("No portable profiles enabled.");
         return;
       }
-      // Turning sharing off must not trigger a first-time sync-backend install.
-      const live = new Map(
-        isSyncBackendInstalled() ? listSyncSessions().map((record) => [record.name, record]) : [],
-      );
+      const stopped = terminateRootSyncSessions(config, workspaceName, roots);
       for (const root of roots) {
-        for (const [targetName, worker] of Object.entries(config.workers)) {
-          const record = live.get(syncSessionName(workspaceName, targetName, worker, root));
-          if (record) stopSyncSession(record.identifier);
-        }
         removeWorkspaceRoot(config, workspaceName, root.local);
         console.log(`removed ${root.local}`);
       }
-      console.log("copies already on a worker stay there until you delete them on that machine");
+      if (stopped.length) console.log(`stopped and verified ${stopped.length} sync session${stopped.length === 1 ? "" : "s"}`);
+      console.log("worker copies remain at their existing ~/.claude and ~/.agents paths; Handoff did not delete them");
       return;
     }
     if (sub === "list" || sub === "status") {
@@ -580,7 +823,7 @@ async function main() {
     if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
     const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
     const saved = persistWorkerMetadata(config, name, metadata);
-    printWorkerChecks(name, workerChecks(saved), saved.trust ?? "trusted");
+    printWorkerChecks(config, name, workerChecks(saved), saved);
     return;
   }
 
@@ -624,6 +867,7 @@ async function main() {
       const name = normalizeName(rest[0], "target name");
       const bootstrapped = prepareTarget(config, name, { quiet: false });
       ensureHerdrInstalled(bootstrapped, { quiet: false });
+      persistWorkerMetadata(config, name, { ...bootstrapped, herdrVersion: HERDR_VERSION });
       console.log(`persistence ✓  Herdr ${HERDR_VERSION}`);
       return;
     }
@@ -634,7 +878,7 @@ async function main() {
       if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
       const metadata = worker.platform && worker.arch ? worker : { ...worker, ...detectWorker(worker) };
       const saved = persistWorkerMetadata(config, name, metadata);
-      printWorkerChecks(name, workerChecks(saved), saved.trust ?? "trusted");
+      printWorkerChecks(config, name, workerChecks(saved), saved);
       return;
     }
     if (sub === "list") {
@@ -668,12 +912,25 @@ async function main() {
     }
     if (sub === "remove-root") {
       requireArgs(rest, 2, "hn workspace remove-root <workspace> <local-path>");
-      console.log(`removed ${removeWorkspaceRoot(config, rest[0], rest[1])}`);
+      const workspaceName = normalizeName(rest[0], "workspace name");
+      const workspace = requireWorkspace(config, workspaceName);
+      const local = normalizeLocalPath(rest[1]);
+      const root = workspace.roots.find((candidate) => normalizeLocalPath(candidate.local) === local);
+      if (!root) fail(`Workspace '${workspaceName}' does not contain root ${local}.`);
+      const stopped = terminateRootSyncSessions(config, workspaceName, [root]);
+      console.log(`removed ${removeWorkspaceRoot(config, workspaceName, local)}`);
+      if (stopped.length) console.log(`stopped and verified ${stopped.length} sync session${stopped.length === 1 ? "" : "s"}`);
+      console.log(`worker files remain at ~/${root.remote}; Handoff did not delete them`);
       return;
     }
     if (sub === "remove") {
       requireArgs(rest, 1, "hn workspace remove <workspace>");
-      console.log(`removed ${removeWorkspace(config, rest[0])}`);
+      const workspaceName = normalizeName(rest[0], "workspace name");
+      const workspace = requireWorkspace(config, workspaceName);
+      const stopped = terminateRootSyncSessions(config, workspaceName, workspace.roots ?? []);
+      console.log(`removed ${removeWorkspace(config, workspaceName)}`);
+      if (stopped.length) console.log(`stopped and verified ${stopped.length} sync session${stopped.length === 1 ? "" : "s"}`);
+      console.log("worker files remain at the configured remote paths; Handoff did not delete them");
       return;
     }
     if (sub === "grant") {
@@ -706,6 +963,15 @@ async function main() {
 
   if (command === "sync") {
     const [sub, ...rest] = args;
+    if (sub === "doctor") {
+      const context = tryFindContext(config, process.cwd());
+      const workspaceName = rest[0]
+        ? normalizeName(rest[0], "workspace name")
+        : context?.name;
+      if (!workspaceName) fail("Usage: hn sync doctor [workspace]");
+      printSyncDoctor(config, workspaceName);
+      return;
+    }
     if (sub === "list") {
       printRecords(listSyncSessions(), "No Handoff sync sessions.");
       return;
@@ -782,7 +1048,7 @@ async function main() {
     let context = currentContext(config);
     const worker = prepareTarget(config, context.targetName);
     context = { ...context, worker };
-    ensureWorkspaceSync(context);
+    ensureWorkspaceSync(config, context);
     const remoteCwd = mapLocalToRemote(context.root, process.cwd());
     runRemoteCommand(worker, remoteCwd, augmentAgentCommand(args, targetWorkspace(context), remoteCwd));
     return;

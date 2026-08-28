@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { copyToWorker, runPosix, runPowerShell } from "./ssh.js";
@@ -108,6 +109,13 @@ export function claudeProfileLinks(roots) {
     const depth = a.link.split("/").length - b.link.split("/").length;
     return depth || a.link.localeCompare(b.link);
   });
+}
+
+export function claudeProfileProjectionFingerprint(roots) {
+  return createHash("sha256")
+    .update(JSON.stringify(claudeProfileLinks(roots)))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 export function ensureClaudeProfileProjection(worker, roots) {

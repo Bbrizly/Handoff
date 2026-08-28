@@ -12,6 +12,7 @@ import {
   isWindowsCompatibleName,
   readHnIgnore,
   syncPolicy,
+  syncPolicyFingerprint,
 } from "../src/sync-policy.js";
 
 test("sync policy is bidirectional with alpha/Mac conflict precedence", () => {
@@ -36,6 +37,14 @@ test("agent profiles preserve portable built tools without copying dependencies 
   assert.ok(policy.ignores.includes(".env"));
   assert.ok(!policy.ignores.includes("dist"));
   assert.ok(!policy.ignores.includes("bin"));
+});
+
+test("dynamic sync policy fingerprint is stable for the same roots", () => {
+  const roots = [{ local: "/missing", remote: ".claude/skills", policy: "agent-profile" }];
+  assert.equal(
+    syncPolicyFingerprint(roots, { platform: "windows" }),
+    syncPolicyFingerprint(roots, { platform: "windows" }),
+  );
 });
 
 test("a file root that Windows cannot name fails before the session is created", () => {

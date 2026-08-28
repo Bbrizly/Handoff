@@ -31,10 +31,9 @@ test("short PowerShell scripts stay in EncodedCommand argv", () => {
   assert.equal(invocation.input, null);
 });
 
-test("large PowerShell scripts stream over stdin instead of argv", () => {
+test("large compressible PowerShell scripts use a short encoded loader", () => {
   const invocation = powerShellInvocation(`Write-Output '${"x".repeat(7000)}'`);
-  assert.ok(!invocation.args.includes("-EncodedCommand"));
-  assert.deepEqual(invocation.args.slice(-2), ["-Command", "-"]);
-  assert.match(invocation.input, /Write-Output/);
-  assert.match(invocation.input, /SilentlyContinue/);
+  assert.ok(invocation.args.includes("-EncodedCommand"));
+  assert.equal(invocation.input, null);
+  assert.ok(invocation.args.at(-1).length <= 6000);
 });

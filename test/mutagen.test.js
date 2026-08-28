@@ -2,11 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   checksumForAsset,
+  assertHealthySync,
   legacySyncSessionName,
   mutagenEndpoint,
   mutagenReleaseAsset,
   parseSessionRecords,
   parseSyncStatusOutput,
+  parseSyncDetailOutput,
+  parseSyncProblemsOutput,
+  syncErrorAdvice,
   syncSessionName,
 } from "../src/mutagen.js";
 
@@ -73,6 +77,15 @@ test("sync status counts visible and excluded conflicts", () => {
   assert.deepEqual(parseSyncStatusOutput("Watching for changes|2|3"), {
     state: "watching for changes",
     conflicts: 5,
+    problemCount: 0,
+  });
+});
+
+test("sync status counts scan and transition problems", () => {
+  assert.deepEqual(parseSyncStatusOutput("Watching for changes|0|0|2|1|0|3"), {
+    state: "watching for changes",
+    conflicts: 0,
+    problemCount: 6,
   });
 });
 
@@ -80,6 +93,7 @@ test("sync status tolerates empty conflict counts", () => {
   assert.deepEqual(parseSyncStatusOutput("Scanning||"), {
     state: "scanning",
     conflicts: 0,
+    problemCount: 0,
   });
 });
 
@@ -87,7 +101,42 @@ test("empty sync status means session is not started", () => {
   assert.deepEqual(parseSyncStatusOutput(""), {
     state: "not-started",
     conflicts: 0,
+    problemCount: 0,
   });
+});
+
+test("sync detail extracts Mutagen's last error", () => {
+  const detail = parseSyncDetailOutput(`Alpha:\n  Connected: Yes\nLast error: alpha scan error: unable to open synchronization root: operation not permitted\nStatus: Waiting 5 seconds for rescan\n`);
+  assert.equal(detail, "alpha scan error: unable to open synchronization root: operation not permitted");
+});
+
+test("sync problem details use local/remote language and preserve exact paths", () => {
+  assert.deepEqual(parseSyncProblemsOutput(
+    "conflict|src/app.js|\nremote write|docs/name:bad.pdf|filename is invalid\nlocal scan|private/file|operation not permitted\n",
+  ), [
+    { type: "conflict", path: "src/app.js", error: "" },
+    { type: "remote write", path: "docs/name:bad.pdf", error: "filename is invalid" },
+    { type: "local scan", path: "private/file", error: "operation not permitted" },
+  ]);
+});
+
+test("controller permission errors include an actionable macOS fix", () => {
+  assert.match(
+    syncErrorAdvice("alpha scan error: unable to open synchronization root: operation not permitted"),
+    /Full Disk Access/,
+  );
+});
+
+test("rescan retries fail immediately when they carry a Mutagen error", () => {
+  assert.throws(
+    () => assertHealthySync("sync_test", {
+      state: "waiting 5 seconds for rescan",
+      conflicts: 0,
+      error: "alpha scan error: unable to open synchronization root: operation not permitted",
+      advice: "Give Terminal Full Disk Access.",
+    }),
+    /Last error: alpha scan error.*Full Disk Access/s,
+  );
 });
 
 test("managed Mutagen selects the official macOS ARM64 release asset", () => {

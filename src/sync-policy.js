@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fail } from "./util.js";
 
@@ -184,7 +185,10 @@ export function syncPolicy(root, worker) {
   if (worker.platform === "windows" && root.kind === "file" && !isWindowsCompatibleName(posix.basename(root.remote))) {
     fail(`Windows cannot represent remote file '${root.remote}'. Choose a compatible remote filename.`);
   }
-  const scanOptions = { agentProfile: root.policy === "agent-profile" };
+  // The default finder limit is suitable for a diagnostic preview, but an
+  // ignore policy must be complete. Large skill trees can contain hundreds of
+  // projected links; stopping at 100 leaves later links as live scan errors.
+  const scanOptions = { agentProfile: root.policy === "agent-profile", limit: 10_000 };
   const incompatible = worker.platform === "windows" ? windowsCompatibilityIgnores(root.local, scanOptions) : [];
   const nonPortableSymlinks = nonPortableSymlinkIgnores(root.local, scanOptions);
   return {
@@ -199,4 +203,15 @@ export function syncPolicy(root, worker) {
     incompatible,
     nonPortableSymlinks,
   };
+}
+
+export function syncPolicyFingerprint(roots, worker) {
+  const policies = roots.map((root) => {
+    const policy = syncPolicy(root, worker);
+    return { local: root.local, remote: root.remote, ignores: policy.ignores };
+  });
+  return createHash("sha256")
+    .update(JSON.stringify(policies))
+    .digest("hex")
+    .slice(0, 16);
 }

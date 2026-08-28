@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node \"$HOME/.hn/claude-statusline.cjs\" 2>/dev/null",
+    "refreshInterval": 30
+  }
+}

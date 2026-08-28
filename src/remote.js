@@ -2,6 +2,7 @@ import { gzipSync } from "node:zlib";
 import { encodePowerShell, runPosix, runPowerShell, runSsh } from "./ssh.js";
 import { remotePathExpression } from "./worker.js";
 import { quotePosix, quotePowerShell } from "./util.js";
+import { HANDOFF_CLAUDE_SETTINGS_TOKEN } from "./statusline.js";
 
 const POWERSHELL_SAFE_ENCODED_LENGTH = 6000;
 
@@ -48,7 +49,9 @@ Remove-Variable hnBin -ErrorAction SilentlyContinue
 }
 
 function windowsInvocation(command, args) {
-  const rest = args.map(quotePowerShell).join(", ");
+  const rest = args.map((arg) => arg === HANDOFF_CLAUDE_SETTINGS_TOKEN
+    ? "(Join-Path $HOME '.hn\\claude-settings.json')"
+    : quotePowerShell(arg)).join(", ");
   return `
 $cmd = ${quotePowerShell(command)}
 $hnArgs = @(${rest})
@@ -62,14 +65,18 @@ exit $LASTEXITCODE
 `;
 }
 
-function windowsInteractiveShellSetup(agentDirs = []) {
+function windowsInteractiveShellSetup(agentDirs = [], claudeSettings = "") {
   const directories = agentDirs.map(quotePowerShell).join(", ");
-  const agentWrappers = agentDirs.length ? `
+  const settings = claudeSettings === HANDOFF_CLAUDE_SETTINGS_TOKEN
+    ? "(Join-Path $HOME '.hn\\claude-settings.json')"
+    : quotePowerShell(claudeSettings);
+  const agentWrappers = agentDirs.length || claudeSettings ? `
 $hnClaudeCommand = Get-Command claude -ErrorAction SilentlyContinue | Select-Object -First 1
 $hnCodexCommand = Get-Command codex -ErrorAction SilentlyContinue | Select-Object -First 1
 $global:hnClaudeApplication = if ($hnClaudeCommand.CommandType -eq 'Alias') { $hnClaudeCommand.Definition } else { $hnClaudeCommand.Source }
 $global:hnCodexApplication = if ($hnCodexCommand.CommandType -eq 'Alias') { $hnCodexCommand.Definition } else { $hnCodexCommand.Source }
 $global:hnAgentDirectories = @(${directories})
+$global:hnClaudeSettings = ${settings}
 if ($global:hnClaudeApplication) {
   Remove-Item Alias:claude -Force -ErrorAction SilentlyContinue
   function global:claude {
@@ -80,6 +87,9 @@ if ($global:hnClaudeApplication) {
     if ($hnManagement -contains $hnFirst) {
       & $global:hnClaudeApplication @hnArguments
       return
+    }
+    if ($global:hnClaudeSettings -and -not ($hnArguments -contains '--settings')) {
+      $hnArguments += @('--settings', $global:hnClaudeSettings)
     }
     $hnSeparator = [Array]::IndexOf($hnArguments, '--')
     if ($hnSeparator -ge 0) {
@@ -125,7 +135,7 @@ ${agentWrappers}
 export function interactivePowerShellArgs(remoteCwd, commandArgs = [], options = {}) {
   const script = commandArgs.length
     ? `$ErrorActionPreference = 'Stop'\n${windowsManagedToolSetup()}\nSet-Location ${remotePathExpression(remoteCwd)}\n${windowsInvocation(commandArgs[0], commandArgs.slice(1))}`
-    : `${windowsManagedToolSetup()}\n${windowsInteractiveShellSetup(options.agentDirs)}\nSet-Location ${remotePathExpression(remoteCwd)}`;
+    : `${windowsManagedToolSetup()}\n${windowsInteractiveShellSetup(options.agentDirs, options.claudeSettings)}\nSet-Location ${remotePathExpression(remoteCwd)}`;
   return [
     "powershell.exe",
     "-NoLogo",
@@ -137,16 +147,28 @@ export function interactivePowerShellArgs(remoteCwd, commandArgs = [], options =
 
 export function interactivePosixScript(remoteCwd, commandArgs = []) {
   const command = commandArgs.length
-    ? commandArgs.map(quotePosix).join(" ")
+    ? commandArgs.map((arg) => arg === HANDOFF_CLAUDE_SETTINGS_TOKEN
+      ? '"$HOME/.hn/claude-settings.json"'
+      : quotePosix(arg)).join(" ")
     : '"${SHELL:-sh}" -l';
   return `${posixCwdSetup(remoteCwd)}\nexec ${command}`;
 }
 
+// The remote program owns the exit code here, so the caller decides what a
+// non-zero one means. Reporting every one as "SSH command failed" turns an
+// ordinary quit into an alarm. A Windows worker returns 0 either way: OpenSSH
+// drops the remote status once a pty is allocated.
 export function runInteractiveRemoteCommand(worker, remoteCwd, commandArgs = [], options = {}) {
   if (worker.platform === "windows") {
-    return runSsh(worker, interactivePowerShellArgs(remoteCwd, commandArgs, options), { tty: true });
+    return runSsh(worker, interactivePowerShellArgs(remoteCwd, commandArgs, options), {
+      tty: true,
+      allowFailure: true,
+    });
   }
-  return runPosix(worker, interactivePosixScript(remoteCwd, commandArgs), { tty: true });
+  return runPosix(worker, interactivePosixScript(remoteCwd, commandArgs), {
+    tty: true,
+    allowFailure: true,
+  });
 }
 
 export function runRemoteCommand(worker, remoteCwd, commandArgs) {
@@ -161,6 +183,8 @@ ${windowsInvocation(command, args)}
     return runPowerShell(worker, script);
   }
 
-  const command = commandArgs.map(quotePosix).join(" ");
+  const command = commandArgs.map((arg) => arg === HANDOFF_CLAUDE_SETTINGS_TOKEN
+    ? '"$HOME/.hn/claude-settings.json"'
+    : quotePosix(arg)).join(" ");
   return runPosix(worker, `${posixCwdSetup(remoteCwd)}\nexec ${command}`);
 }

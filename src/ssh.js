@@ -1,4 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { fail, quotePosix } from "./util.js";
 
 const POWERSHELL_SAFE_ENCODED_LENGTH = 6000;
@@ -46,6 +50,8 @@ export function parseSshTarget(input) {
 }
 
 function connectionArgs(worker) {
+  const controlDir = join(homedir(), ".hn", "state");
+  mkdirSync(controlDir, { recursive: true, mode: 0o700 });
   return [
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=5",
@@ -53,6 +59,9 @@ function connectionArgs(worker) {
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ServerAliveInterval=5",
     "-o", "ServerAliveCountMax=3",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=60",
+    "-o", `ControlPath=${join(controlDir, "ssh-%C")}`,
   ];
 }
 
@@ -71,7 +80,7 @@ export function encodePowerShell(script) {
 
 export function powerShellInvocation(script) {
   const wrapped = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
-  const encoded = encodePowerShell(wrapped);
+  let encoded = encodePowerShell(wrapped);
   const base = [
     "powershell.exe",
     "-NoLogo",
@@ -81,9 +90,22 @@ export function powerShellInvocation(script) {
     "Text",
   ];
 
-  // Windows/OpenSSH can reject large remote argv strings before PowerShell ever
-  // starts. Keep normal commands encoded, but stream oversized scripts on stdin.
+  // Keep native commands away from the script transport stdin. Otherwise a
+  // command can consume the remainder of a large PowerShell program. A
+  // compressed loader normally stays below OpenSSH's argv limit.
   if (encoded.length > POWERSHELL_SAFE_ENCODED_LENGTH) {
+    const payload = gzipSync(Buffer.from(wrapped, "utf8")).toString("base64");
+    const loader = `$hnBytes = [Convert]::FromBase64String('${payload}')
+$hnInput = New-Object IO.MemoryStream(,$hnBytes)
+$hnGzip = New-Object IO.Compression.GzipStream($hnInput, [IO.Compression.CompressionMode]::Decompress)
+$hnReader = New-Object IO.StreamReader($hnGzip, [Text.Encoding]::UTF8)
+$hnScript = $hnReader.ReadToEnd()
+$hnReader.Dispose()
+. ([scriptblock]::Create($hnScript))`;
+    encoded = encodePowerShell(loader);
+    if (encoded.length <= POWERSHELL_SAFE_ENCODED_LENGTH) {
+      return { args: [...base, "-EncodedCommand", encoded], input: null };
+    }
     return {
       args: [...base, "-Command", "-"],
       input: wrapped,

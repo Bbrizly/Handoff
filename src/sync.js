@@ -20,6 +20,7 @@ export const syncBackend = Object.freeze({
   ensureRoot: mutagen.ensureSyncRoot,
   flush: mutagen.flushSyncSessions,
   status: mutagen.getSyncStatus,
+  problems: mutagen.getSyncProblems,
   sessionName: mutagen.syncSessionName,
   showStatus: mutagen.showSyncStatus,
   listOwned: listHandoffSyncs,
@@ -35,7 +36,9 @@ export const forwardingBackend = Object.freeze({
 
 export const ensureSyncRoot = (...args) => syncBackend.ensureRoot(...args);
 export const flushSyncSessions = (...args) => syncBackend.flush(...args);
+export const assertHealthySync = (...args) => mutagen.assertHealthySync(...args);
 export const getSyncStatus = (...args) => syncBackend.status(...args);
+export const getSyncProblems = (...args) => syncBackend.problems(...args);
 export const isSyncBackendInstalled = () => syncBackend.isAvailable();
 export const syncSessionName = (...args) => syncBackend.sessionName(...args);
 export const listSyncSessions = () => syncBackend.listOwned();
