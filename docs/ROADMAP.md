@@ -325,10 +325,17 @@ Done, measured on the Lenovo:
 - Claude launched into a project was detected as an agent with an `idle` state, and asking again focused it instead of starting a second one;
 - attaching renders the desk over Handoff's own SSH PTY, with mouse tracking and Handoff's window title.
 
+Added 2026-08-28, measured on the Lenovo:
+
+- closing an attachment reports a detach, not `SSH command failed (255)`. Four attach/detach cycles, exit 0 each time;
+- four cycles left the same server process, the same two Claude processes, the same four projects, and exactly one Herdr client at any moment;
+- a deleted Herdr binary is detected by the desk probe and reinstalled, under a running desk, without losing the desk or its agents;
+- executable paths and arguments containing spaces round-trip through `pane run`.
+
 Remaining:
 
-- a human in the loop: click through the sidebar, close the terminal, come back;
-- reboot recovery, including the agent integrations that resume a conversation;
+- a human in the loop: click through the sidebar, close the terminal for an hour, come back;
+- **reboot recovery is untested.** Nobody has rebooted the worker and run `hn pc -p`. Do not record this as solved until someone does;
 - `hn attention` for the agents that are waiting;
 - retire `hn new`, `hn attach`, `hn session`, and raw session names, then delete Zellij.
 
@@ -361,6 +368,7 @@ Required v1 proof:
 - one-shot `hn exec`;
 - manual `hn port`;
 - clear doctor/status/errors;
-- reproducible Handoff-managed Mutagen bootstrap and optional Zellij installation;
+- reproducible Handoff-managed Mutagen bootstrap and on-demand Herdr installation;
+- Claude on a worker rendering the controller's own statusline;
 - no remote `.git`;
 - no Handoff-hosted backend required.

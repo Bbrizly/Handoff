@@ -315,12 +315,23 @@ Expected behavior:
 ### 7.7 Optional managed persistence
 
 ```bash
+hn pc -p
+hn pc -p claude
+```
+
+`-p` opens the persistent desk. It runs on Herdr, installs on first use, and is not required for the transparent terminal or direct command paths. Closing an attachment leaves the desk and its processes running; `hn pc -p` returns to them.
+
+```bash
 hn session
 hn session claude
 hn session new claude
 ```
 
-Managed persistence is layered behind `SessionBackend` and is not required for the transparent terminal or direct command paths. Users may also run `zellij` themselves inside `hn pc`.
+These are the older Zellij surface. They are legacy, scheduled for removal, and are not the persistence Handoff offers today. Users may also run a multiplexer themselves inside `hn pc`.
+
+### 7.7a Claude's appearance on a worker
+
+Handoff starts Claude with its own settings file and never writes the worker's `~/.claude/settings.json`. That settings file gives the worker's Claude the controller's own statusline: same segments, order, colours, context and usage percentages, model and directory formatting. The branch and dirty-state segments degrade to dim placeholders because `.git` stays on the controller.
 
 ### 7.8 Arbitrary remote work
 
@@ -596,7 +607,9 @@ At the time this document was created, the code already implements:
 - `hn access` sharing explanation;
 - status and doctor commands.
 
-The transparent core path is physically proven on native Windows: `hn pc` entered `C:\Users\Lenovo\hn\main\GitHub\Handoff`, Node returned `win32 x64`, Claude and Codex opened interactively, a Vite dev server ran remotely, and `hn port` exposed it through Mac localhost. Optional managed native-Windows Zellij creation remains experimental.
+The transparent core path is physically proven on native Windows: `hn pc` entered `C:\Users\Lenovo\hn\main\GitHub\Handoff`, Node returned `win32 x64`, Claude and Codex opened interactively, a Vite dev server ran remotely, and `hn port` exposed it through Mac localhost.
+
+The `-p` persistent desk is proven on the same machine: project switching, agent reuse without duplicates, survival across repeated disconnects, and recovery when a managed file or the Herdr binary is deleted. Worker reboot recovery is not tested. Optional managed native-Windows Zellij creation was never proven and is legacy.
 
 ## 12. Proven real-world synchronization lessons
 

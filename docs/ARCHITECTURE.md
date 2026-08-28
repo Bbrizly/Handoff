@@ -434,6 +434,22 @@ On Windows, Handoff starts profile-aware PowerShell with `-NoExit` for the shell
 
 On POSIX, Handoff enters the user's login shell. Direct forms such as `hn pc claude` execute the command with the same PTY and mapped cwd but do not create a session.
 
+### 12.1a The managed Claude experience on a worker
+
+When Handoff starts Claude it passes `--settings ~/.hn/claude-settings.json`. The worker's own `~/.claude/settings.json` is never written, so a worker the user also drives directly keeps its own configuration.
+
+Handoff owns exactly three things for this:
+
+```text
+~/.hn/claude-statusline.cjs    the statusline renderer
+~/.hn/claude-settings.json     points Claude's statusLine at it, absolute path, no redirect
+~/.claude/... junctions        the projected profile links
+```
+
+The renderer reproduces the controller's own statusline segment for segment. The two Git segments degrade, because `.git` stays on the controller. See HN-070.
+
+Freshness is cached per worker (`handoffStatuslineVersion`, `claudeProfileProjection`) so a normal launch does no install work. The cache is a hint, not an assertion about the worker: one guard script runs before the launch and reports on stdout when a managed file or a projected link is gone, and Handoff repairs once and continues. On Windows the signal must be stdout, because `ssh -tt` returns 0 whatever the remote program exits with. See HN-072.
+
 ### 12.2 Why Zellij remains available
 
 The persistent desk (`hn <target> -p`) runs on Herdr, pinned at v0.8.2 and Apache-2.0. Everything Handoff knows about Herdr lives in `src/herdr.js`; nothing outside that module builds a Herdr command line.
@@ -449,7 +465,11 @@ Herdr runs under a Handoff-owned config at `~/.hn/herdr/config.toml`, selected w
 
 Attaching does not use Herdr's own `--remote` client, which does not support Windows remote hosts. Handoff already owns SSH, so it runs a Herdr client on the worker through its own PTY.
 
-Zellij remains only behind the legacy `hn session` commands because it is cross-platform and has native Windows support. tmux and mandatory WSL remain rejected. Core Handoff does not depend on either backend.
+Ending an attachment is not a failure. A non-zero attach asks the desk directly (`herdr status server`); a running server means the user detached, and a silent one means a real fault. See HN-071.
+
+One probe covers the whole `-p` preflight: whether the desk is up, whether the Herdr binary is still installed, and whether Handoff's managed Claude files and profile links are still on the worker. It is the round trip the launch had to make anyway. Measured on the reference Lenovo: 265 to 305 ms for the probe, 910 to 930 ms for everything before the TUI appears.
+
+Zellij remains only behind the legacy `hn session`, `hn new`, and `hn attach` commands. It is history, not the persistence Handoff offers; managed Zellij on native Windows was never proven. tmux and mandatory WSL remain rejected. Core Handoff does not depend on either backend.
 
 The dependency is enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; the persistence runtime installs only when a persistent command asks for it. `hn doctor` reports a missing runtime as `— persistence`, not a failure.
 

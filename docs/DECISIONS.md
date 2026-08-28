@@ -977,3 +977,101 @@ That is now `src/windows-detach.js`, shared by both backends. Two failures were 
 
 - `Start-Process` alone is not enough. The server starts, answers while the SSH session is open, and is gone once it closes.
 - `Start-Process -RedirectStandardOutput` kills Herdr silently. It needs real console handles; redirecting its stdio to a file leaves a zero-byte log and no server. Herdr writes its own log under its session directory, so Handoff redirects nothing.
+
+---
+
+## HN-070 — The worker's Claude wears the controller's statusline, minus the Git it cannot see
+
+**Status:** Accepted; live-proven on the reference Lenovo
+
+A remote Claude that looks different from the local one reads as a lesser Claude, and that was the stated adoption blocker. Handoff ships `assets/claude-statusline.cjs` to `~/.hn/claude-statusline.cjs` and points its own settings file at it with `--settings`. The worker's `~/.claude/settings.json` is never written.
+
+The script reproduces the controller's `~/.claude/statusline.sh` exactly: segment order, labels, colours, separators, context percentage, the 5h and weekly countdowns with their `5h`/`7d` fallbacks, the reserved Fable segment, model shortening (`Opus 4.8 (1M context)` becomes `Opus4.8_1M`), and home-relative directory display.
+
+One segment is allowed to differ. `.git` stays on the controller, so the worker has no repository. Branch degrades to the dim `⎇ —` the local script already prints when it finds none. Dirty state degrades to a dim `—` rather than the local script's `clean`, because Handoff will not assert a Git state it cannot read. Nothing else is invented.
+
+A test feeds identical payloads to both renderers and asserts every segment before the last is byte-identical, and that the last is exactly this one difference.
+
+Rejected: a `hn` badge and a `local Git` label. Both were text invented to fill space the Git segments used to hold.
+
+---
+
+## HN-071 — Closing an attachment is not a failure
+
+**Status:** Accepted; live-proven
+
+`hn pc -p` ended with `hn: SSH command failed (255)` every time the user closed the desk. The desk was fine. 255 is ssh's own code for a connection that ended without a remote exit status, and closing a window produces exactly that.
+
+Suppressing 255 was rejected: a real network fault produces the same code.
+
+Instead, a non-zero attach asks the desk itself. `herdr --session <runtime> status server` is one cheap round trip. If the server answers `status: running`, the attachment ended and Handoff says so:
+
+```text
+desk still running on pc. 'hn pc -p' comes back to it
+```
+
+If it does not answer, that is a genuine failure and keeps a real error. Proven over four attach/detach cycles on the Lenovo: exit 0 each time, the same desk, the same two Claude processes, no duplicates.
+
+---
+
+## HN-072 — A cached fact about the worker is a hint, and the launch checks it
+
+**Status:** Accepted; live-proven
+
+Handoff caches `handoffStatuslineVersion`, `herdrVersion`, `claudeProfileProjection`, and `profileSyncPolicyFingerprint` per worker so a normal launch does no unconditional install work. A cache like that quietly becomes a wrong permanent assertion the moment someone deletes a file on the worker.
+
+So the launch verifies, and repairs once, instead of trusting the cache blindly:
+
+- `hn pc claude` runs one guard script before starting Claude. It reports a marker on stdout when either managed file or any projected profile link is missing. Handoff then re-ships the files, re-projects the links, and launches.
+- `hn pc -p` gets the same answer for free. The guard rides the desk probe that already had to run, which also reports whether the Herdr binary is still there.
+
+The signal is a stdout marker, never an exit code. Measured on Windows: `ssh -tt` returns 0 no matter what the remote program exits with, because OpenSSH drops the remote status once a pty is allocated. An earlier exit-code protocol was written, measured, and deleted for that reason.
+
+Measured cost on the reference Lenovo: `hn pc claude` median 2.45s without the guard, 2.79s with it. `hn pc -p` pays nothing.
+
+Live-proven by deleting each asset on the worker and launching: the statusline script, the settings file, a projected junction, and the Herdr binary. Each one was detected and put back.
+
+---
+
+## HN-073 — Install Herdr beside its locked files, not over them
+
+**Status:** Accepted; fixed after a live failure
+
+Restoring a deleted `herdr.exe` while a desk is running failed:
+
+```text
+Remove-Item : Cannot remove item ...\0.8.2\conpty\conpty.dll: Access to the path is denied.
+```
+
+`Expand-Archive -Force` deletes each entry before writing it, and the running server holds its ConPTY DLLs open.
+
+The install now unpacks to a staging directory under `%TEMP%` and copies into place with `-ErrorAction SilentlyContinue`. A locked file is already the correct file, so failing to overwrite it is not an error. The `herdr --version` check that follows is what decides whether the install worked.
+
+Proven on the Lenovo: the binary was restored under a running desk, and the desk kept its server process, its four projects, and both Claude agents.
+
+---
+
+## HN-074 — MCP health comes from Claude, or it is not claimed
+
+**Status:** Accepted
+
+`hn doctor` used to scan `~/.claude.json` and `~/.claude/settings.json` for `mcpServers` and check that each command existed on PATH. That is not Claude's effective MCP configuration, and printing `✓ mcp` from it was a claim Handoff had not earned.
+
+Doctor now runs `claude mcp list` on the worker and reports what it says:
+
+```text
+✓ mcp  claude mcp list: 2/2 connected
+✗ mcp  claude mcp list: 1/3 not connected: broken-one
+```
+
+Only server names and connection status are parsed. The command column is never read or printed: it can hold an API key in a URL or an env value. When Claude is absent, or the command fails or times out, doctor says that instead of guessing.
+
+---
+
+## HN-075 — Synchronized is not the same as usable, and doctor says which one it means
+
+**Status:** Accepted
+
+Codex reported thirteen `SKILL.md` files under gstack missing required YAML frontmatter. Those files are byte-identical on both machines. Handoff synchronized them correctly; they are invalid upstream.
+
+Handoff's diagnostics only claim what Handoff can know. The profile line reads `7 roots synchronized`. Whether a given skill, agent, or command file is valid is the agent runtime's own check, and Handoff does not edit third-party or personal skill content to make its own output green.

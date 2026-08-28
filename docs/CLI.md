@@ -444,16 +444,36 @@ hn doctor pc
 Current checks:
 
 ```text
-pc  windows/x64
+pc  windows/x64  trusted
+
+core
   ✓ ssh
+  ✓ workspace  main (9 roots)
+  ✓ sync
+  ✓ sync engine  controller
+  ✓ persistence  Herdr 0.8.2
+
+ai
   ✓ claude
+  ✓ claude auth  plausibility check
   ✓ codex
   ✓ node
-  ✓ persistence  (Herdr 0.8.2)
-  ✓ mutagen (controller)
+  ✓ profile  7 roots synchronized
+  ✓ statusline  Handoff launches only
+
+optional
+  ✓ chrome  installed
+  — chrome extension  worker-local; verify with claude --chrome
+  ✓ mcp  claude mcp list: 2/2 connected
 ```
 
 A worker that has never been used with `-p` reports `— persistence` instead. An optional capability nobody asked for is not a failure.
+
+Each line says exactly what it proved:
+
+- `profile` says **synchronized**. Whether a skill or agent file is valid is the agent runtime's own check, not Handoff's. See HN-075;
+- `statusline` says **Handoff launches only**, because the worker's own `~/.claude/settings.json` is untouched;
+- `mcp` reports what `claude mcp list` said. Only names and connection status are read; the command column can hold an API key and is never printed. Without Claude on the worker, or when the command fails or times out, the line says that instead of guessing. See HN-074.
 
 Future useful checks:
 

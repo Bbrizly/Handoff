@@ -173,6 +173,26 @@ That opens a desk: every synchronized project on that machine in one sidebar, wi
 
 The desk runs on [Herdr](https://herdr.dev), pinned and checksum-verified like everything else Handoff installs. Nothing installs it until your first `-p`.
 
+Closing an attachment is not an error. Handoff asks the desk whether it is still running and says so:
+
+```text
+desk still running on pc. 'hn pc -p' comes back to it
+```
+
+If the desk really is gone, it says that instead.
+
+## Claude on a worker looks like Claude at home
+
+When Handoff starts Claude on a worker it passes its own settings file, so the worker's own `~/.claude/settings.json` is never touched. That file gives Claude the same statusline you have locally: same segments, same order, same colours, same context and usage percentages, same model and directory formatting.
+
+One part is honestly different. `.git` stays on the controller, so the worker has no repository to read. The branch and dirty-file segments fall back to the same dim placeholders the local script already uses when it finds no repository. Nothing is invented to fill the space.
+
+Handoff owns two files for this, `~/.hn/claude-statusline.cjs` and `~/.hn/claude-settings.json`, plus the profile links it projects. It caches the fact that they are in place so a normal launch is fast. Before starting Claude it still asks the worker whether they are actually there, and puts back anything that went missing:
+
+```text
+worker is missing Handoff's managed Claude files; restoring...
+```
+
 Other useful commands:
 
 ```bash
@@ -202,7 +222,7 @@ Because remote Codex has no `.git`, `hn` automatically supplies Codex's `--skip-
 - native Windows over OpenSSH / PowerShell
 - Linux over SSH
 - macOS over SSH
-- x64 and arm64 where an official Zellij build exists
+- x64 and arm64 where an official Herdr build exists
 
 Windows does **not** require WSL.
 
@@ -210,7 +230,9 @@ Windows does **not** require WSL.
 
 Mutagen documents historical performance/stalling issues with Microsoft's Windows OpenSSH server. The architecture avoids extra Windows setup, but real performance still depends on the actual Windows SSH endpoint. `hn doctor` checks connectivity and required worker tools.
 
-The transparent native-Windows terminal is proven on the reference Lenovo with Node, Claude, Codex, Vite, bidirectional sync, and port forwarding. Optional Handoff-managed native-Windows Zellij persistence remains experimental; users can run Zellij manually inside `hn pc` without making it a core dependency. See [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md).
+The transparent native-Windows terminal is proven on the reference Lenovo with Node, Claude, Codex, Vite, bidirectional sync, and port forwarding. The `-p` persistent desk is proven there too: project switching, agent reuse, and survival across repeated disconnects.
+
+`hn session`, `hn new`, and `hn attach` are the older Zellij surface. They are legacy and are not the persistence Handoff offers today. Managed Zellij on native Windows was never proven and stays experimental. See [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md).
 
 ## Third-party software
 
