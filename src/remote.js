@@ -1,5 +1,5 @@
 import { gzipSync } from "node:zlib";
-import { encodePowerShell, runPosix, runPowerShell, runSsh } from "./ssh.js";
+import { encodePowerShell, runPosix, runPowerShell, runSsh, testSsh } from "./ssh.js";
 import { remotePathExpression } from "./worker.js";
 import { quotePosix, quotePowerShell } from "./util.js";
 import { HANDOFF_CLAUDE_SETTINGS_TOKEN } from "./statusline.js";
@@ -152,6 +152,16 @@ export function interactivePosixScript(remoteCwd, commandArgs = []) {
       : quotePosix(arg)).join(" ")
     : '"${SHELL:-sh}" -l';
   return `${posixCwdSetup(remoteCwd)}\nexec ${command}`;
+}
+
+// ssh reports its own transport failures as 255, and a remote program is free
+// to exit 255 too. Ask the connection before blaming it: that keeps ordinary
+// failures quiet and still tells the user when the link is what broke.
+export const SSH_TRANSPORT_EXIT = 255;
+
+export function sshTransportFailed(worker, code, probe = testSsh) {
+  if (code !== SSH_TRANSPORT_EXIT) return false;
+  return probe(worker).code !== 0;
 }
 
 // The remote program owns the exit code here, so the caller decides what a

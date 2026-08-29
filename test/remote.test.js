@@ -78,3 +78,25 @@ test("interactive POSIX shell and direct command preserve the mapped cwd", () =>
   assert.match(command, /\.hn\/bin/);
   assert.match(command, /exec 'npm' 'run' 'dev'/);
 });
+
+// A remote program's exit code is its own. Only a dead connection earns a
+// Handoff message, so 255 gets a cheap probe before it is called a link failure.
+test("an ordinary remote failure never touches the connection", () => {
+  let probed = 0;
+  const probe = () => { probed += 1; return { code: 0 }; };
+  const worker = { target: "me@pc" };
+  assert.equal(remote.sshTransportFailed(worker, 0, probe), false);
+  assert.equal(remote.sshTransportFailed(worker, 1, probe), false);
+  assert.equal(remote.sshTransportFailed(worker, 130, probe), false);
+  assert.equal(probed, 0);
+});
+
+test("a remote program that exits 255 on a live link is not a transport failure", () => {
+  const probe = () => ({ code: 0, stdout: "hn-ok\n" });
+  assert.equal(remote.sshTransportFailed({ target: "me@pc" }, 255, probe), false);
+});
+
+test("255 on a dead link is reported as a transport failure", () => {
+  const probe = () => ({ code: 255, stdout: "", stderr: "connection refused" });
+  assert.equal(remote.sshTransportFailed({ target: "me@pc" }, 255, probe), true);
+});

@@ -71,7 +71,7 @@ import {
   sessionNameFor,
   shellCommand,
 } from "./session.js";
-import { runInteractiveRemoteCommand, runRemoteCommand } from "./remote.js";
+import { runInteractiveRemoteCommand, runRemoteCommand, sshTransportFailed } from "./remote.js";
 import {
   claudeProfileLinks,
   claudeProfileRoots,
@@ -689,7 +689,14 @@ function runInteractive(config, targetName, commandArgs = [], { preparedWorker =
     claudeSettings: handoffClaudeSettingsArgument(),
   });
   // The remote program's exit code is the user's answer, not a Handoff error.
-  if (result.code) process.exitCode = result.code;
+  // Only a dead connection gets explained.
+  if (result.code) {
+    if (sshTransportFailed(worker, result.code)) {
+      console.error(`lost the connection to ${targetName} (${worker.target}). the worker may be asleep or off the network`);
+      console.error(`check it with: hn status ${targetName}`);
+    }
+    process.exitCode = result.code;
+  }
 }
 
 async function main() {
