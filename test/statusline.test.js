@@ -133,21 +133,32 @@ test("portable statusline fails silently on invalid input", () => {
   assert.equal(result.stderr, "");
 });
 
-test("managed asset guard reports when a managed file is gone", () => {
+test("managed asset guard checks every link by exact path and target", () => {
   const expectation = managedExpectation([
     { link: ".claude/skills/one", target: ".agents/skills/one" },
     { link: ".agents/skills/two", target: ".agents/skills/two" },
   ]);
-  assert.deepEqual(expectation, { directories: [".claude/skills", ".agents/skills"], links: 2 });
+  assert.deepEqual(expectation, {
+    links: [
+      { link: ".claude/skills/one", target: ".agents/skills/one" },
+      { link: ".agents/skills/two", target: ".agents/skills/two" },
+    ],
+  });
 
   const windows = managedAssetGuardScript({ platform: "windows" }, expectation);
   assert.match(windows, /claude-statusline\.cjs/);
   assert.match(windows, /claude-settings\.json/);
-  assert.match(windows, /'\.claude\\skills', '\.agents\\skills'/);
+  assert.match(windows, /'\.claude\\skills\\one\|\.agents\\skills\\one'/);
+  assert.match(windows, /'\.agents\\skills\\two\|\.agents\\skills\\two'/);
+  assert.match(windows, /LinkType -eq 'Junction'/);
+  assert.match(windows, /Target -contains/);
   assert.match(windows, new RegExp(MANAGED_REPAIR_MARKER));
+  // A count would let one stray junction cover for a missing expected link.
+  assert.doesNotMatch(windows, /Get-ChildItem/);
 
   const posix = managedAssetGuardScript({ platform: "linux" }, expectation);
   assert.match(posix, /\[ -f "\$HOME\/\.hn\/claude-settings\.json" \]/);
+  assert.match(posix, /readlink "\$HOME"\/'\.claude\/skills\/one'/);
   assert.match(posix, new RegExp(MANAGED_REPAIR_MARKER));
 });
 
@@ -163,23 +174,40 @@ test("managed asset guard signals on stdout and never by exit code", () => {
   assert.match(missing.stdout, new RegExp(MANAGED_REPAIR_MARKER));
 });
 
-test("managed asset guard stays quiet when everything is in place", (t) => {
+function guardHome(t) {
   const home = mkdtempSync(join(tmpdir(), "hn-guard-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   mkdirSync(join(home, ".hn"), { recursive: true });
   mkdirSync(join(home, ".agents", "skills", "real"), { recursive: true });
+  mkdirSync(join(home, ".agents", "skills", "other"), { recursive: true });
   mkdirSync(join(home, ".claude", "skills"), { recursive: true });
   writeFileSync(join(home, ".hn", "claude-statusline.cjs"), "");
   writeFileSync(join(home, ".hn", "claude-settings.json"), "{}");
+  return home;
+}
+
+const EXPECTED_LINK = { link: ".claude/skills/one", target: ".agents/skills/real" };
+
+function runGuard(home, links = [EXPECTED_LINK]) {
+  const script = managedAssetGuardScript({ platform: "linux" }, managedExpectation(links));
+  return spawnSync("sh", ["-c", script], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+}
+
+test("healthy exact projection stays quiet", (t) => {
+  const home = guardHome(t);
   symlinkSync(join(home, ".agents", "skills", "real"), join(home, ".claude", "skills", "one"));
+  assert.equal(runGuard(home).stdout.trim(), "");
+});
 
-  const expectation = managedExpectation([{ link: ".claude/skills/one", target: ".agents/skills/real" }]);
-  const script = managedAssetGuardScript({ platform: "linux" }, expectation);
-  const healthy = spawnSync("sh", ["-c", script], { env: { ...process.env, HOME: home }, encoding: "utf8" });
-  assert.equal(healthy.stdout.trim(), "");
+test("an expected link is missing even when an unrelated junction is there", (t) => {
+  const home = guardHome(t);
+  // The count is right; the one link a launch depends on is not there.
+  symlinkSync(join(home, ".agents", "skills", "other"), join(home, ".claude", "skills", "stray"));
+  assert.match(runGuard(home).stdout, new RegExp(MANAGED_REPAIR_MARKER));
+});
 
-  // Remove the projected link and the same guard must now ask for a repair.
-  rmSync(join(home, ".claude", "skills", "one"));
-  const broken = spawnSync("sh", ["-c", script], { env: { ...process.env, HOME: home }, encoding: "utf8" });
-  assert.match(broken.stdout, new RegExp(MANAGED_REPAIR_MARKER));
+test("an expected link that points at the wrong target asks for a repair", (t) => {
+  const home = guardHome(t);
+  symlinkSync(join(home, ".agents", "skills", "other"), join(home, ".claude", "skills", "one"));
+  assert.match(runGuard(home).stdout, new RegExp(MANAGED_REPAIR_MARKER));
 });

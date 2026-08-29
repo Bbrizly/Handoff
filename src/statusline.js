@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { copyToWorker, runPosix, runPowerShell } from "./ssh.js";
+import { quotePosix, quotePowerShell } from "./util.js";
 import { ensureRemoteDirectory } from "./worker.js";
 
 export const HANDOFF_STATUSLINE_VERSION = 5;
@@ -45,12 +46,11 @@ $hnSettings | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $HOM
 `;
 }
 
-// What a launch expects to still be there: the two managed files, plus the
-// profile junctions Handoff projected. Directories are one level deep, so the
-// count is one cheap listing per directory.
+// What a launch expects to still be there: the two managed files, plus every
+// projected profile link, checked by exact path and exact target. A count lets
+// a stray junction stand in for a missing one, and never sees a wrong target.
 export function managedExpectation(links = []) {
-  const directories = [...new Set(links.map((link) => link.link.split("/").slice(0, -1).join("/")))];
-  return { directories, links: links.length };
+  return { links: links.map(({ link, target }) => ({ link, target })) };
 }
 
 export const MANAGED_REPAIR_MARKER = "hn-repair";
@@ -58,39 +58,32 @@ export const MANAGED_REPAIR_MARKER = "hn-repair";
 // Prints the marker when one of Handoff's managed files is gone. It never
 // exits non-zero: 'ssh -tt' to a Windows worker does not return the remote exit
 // code, so a marker on stdout is the only signal that survives the trip.
-export function managedAssetGuardScript(worker, expectation = { directories: [], links: 0 }) {
-  const { directories = [], links = 0 } = expectation;
+export function managedAssetGuardScript(worker, expectation = { links: [] }) {
+  const links = expectation.links ?? [];
   if (worker.platform === "windows") {
-    const list = directories.map((dir) => `'${dir.replaceAll("/", "\\")}'`).join(", ");
+    const list = links
+      .map(({ link, target }) => quotePowerShell(
+        `${link.replaceAll("/", "\\")}|${target.replaceAll("/", "\\")}`,
+      ))
+      .join(", ");
     return `$hnOk = (Test-Path -LiteralPath (Join-Path $HOME '.hn\\claude-statusline.cjs') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $HOME '.hn\\claude-settings.json') -PathType Leaf)
-if ($hnOk -and ${links} -gt 0) {
-  $hnLinks = 0
-  foreach ($hnDir in @(${list})) {
-    $hnPath = Join-Path $HOME $hnDir
-    if (Test-Path -LiteralPath $hnPath -PathType Container) {
-      $hnLinks += @(Get-ChildItem -LiteralPath $hnPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.LinkType -eq 'Junction' }).Count
-    }
-  }
-  if ($hnLinks -lt ${links}) { $hnOk = $false }
+foreach ($hnPair in @(${list})) {
+  if (-not $hnOk) { break }
+  $hnParts = $hnPair -split '\\|', 2
+  $hnItem = Get-Item -LiteralPath (Join-Path $HOME $hnParts[0]) -Force -ErrorAction SilentlyContinue
+  if (-not ($hnItem -and $hnItem.LinkType -eq 'Junction' -and ($hnItem.Target -contains (Join-Path $HOME $hnParts[1])))) { $hnOk = $false }
 }
 if (-not $hnOk) { Write-Output '${MANAGED_REPAIR_MARKER}' }
 `;
   }
 
-  const list = directories.map((dir) => `"$HOME/${dir}"`).join(" ");
+  const checks = links
+    .map(({ link, target }) => `[ "$(readlink "$HOME"/${quotePosix(link)} 2>/dev/null)" = "$HOME"/${quotePosix(target)} ] || hn_ok=0`)
+    .join("\n");
   return `hn_ok=1
 [ -f "$HOME/.hn/claude-statusline.cjs" ] || hn_ok=0
 [ -f "$HOME/.hn/claude-settings.json" ] || hn_ok=0
-if [ "$hn_ok" = 1 ] && [ ${links} -gt 0 ]; then
-  hn_links=0
-  for hn_dir in ${list || '""'}; do
-    [ -d "$hn_dir" ] || continue
-    for hn_entry in "$hn_dir"/*; do
-      [ -L "$hn_entry" ] && hn_links=$((hn_links + 1))
-    done
-  done
-  [ "$hn_links" -ge ${links} ] || hn_ok=0
-fi
+${checks}
 [ "$hn_ok" = 1 ] || echo ${MANAGED_REPAIR_MARKER}
 `;
 }
