@@ -164,6 +164,11 @@ try {
   $configuredShell = (Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell
   if (-not [string]::IsNullOrWhiteSpace([string]$configuredShell)) { $sshShell = [string]$configuredShell }
 } catch { }
+$pathHerdr = ''
+try {
+  $pathCommand = Get-Command herdr.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($pathCommand) { $pathHerdr = [string]$pathCommand.Source }
+} catch { }
 $serverExe = ${remotePathExpression(`.hn/bin/herdr/${THIN_HERDR_UPSTREAM_VERSION}/herdr.exe`)}
 $server = $null
 if (Test-Path -LiteralPath $serverExe -PathType Leaf) {
@@ -192,12 +197,12 @@ if (Test-Path -LiteralPath $bridgeExe -PathType Leaf) {
     Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
   }
 }
-@{ server = $server; bridge = $bridge; sshShell = $sshShell } | ConvertTo-Json -Depth 8 -Compress
+@{ server = $server; bridge = $bridge; sshShell = $sshShell; pathHerdr = $pathHerdr } | ConvertTo-Json -Depth 8 -Compress
 `;
 }
 
 export function probeThinReadiness(worker, runtime) {
-  const fallback = { server: null, bridge: { state: "error", version: "", protocol: 0 }, sshShell: "" };
+  const fallback = { server: null, bridge: { state: "error", version: "", protocol: 0 }, sshShell: "", pathHerdr: "" };
   const result = runPowerShell(worker, readinessScript(runtime), {
     capture: true,
     allowFailure: true,
@@ -302,6 +307,9 @@ export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
   const observed = readiness ?? probeThinReadiness(worker, runtime);
   if (!thinWindowsSshShellCompatible(observed.sshShell)) {
     return { available: false, reason: `Windows OpenSSH DefaultShell '${observed.sshShell || "unknown"}' cannot stream the Herdr bridge; use cmd.exe or pwsh.exe` };
+  }
+  if (String(observed.pathHerdr ?? "").trim()) {
+    return { available: false, reason: `Windows PATH already resolves Herdr at '${observed.pathHerdr}'; refusing thin mode because herdr-win could select that user-owned binary instead of Handoff's sidecar` };
   }
   if (!thinServerCompatible(observed.server)) {
     return { available: false, reason: "the running Handoff Herdr server is not a compatible detached v0.8.2/protocol-20 server" };
