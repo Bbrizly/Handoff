@@ -16,6 +16,7 @@ import { windowsPowerShellBootstrapCommand, windowsShellBootstrapScript } from "
 import { windowsDetachedLaunchScript } from "./windows-detach.js";
 import { fail, quotePosix, quotePowerShell, shortHash, slug } from "./util.js";
 import { HANDOFF_CLAUDE_SETTINGS_TOKEN, MANAGED_REPAIR_MARKER } from "./statusline.js";
+import { attachThinHerdr, thinTransportMode } from "./herdr-thin.js";
 
 export const HERDR_VERSION = "0.8.2";
 
@@ -46,7 +47,7 @@ const HERDR_ASSETS = {
   },
   "darwin:arm64": {
     file: "herdr-macos-aarch64",
-    sha256: "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574",
+    sha256: "a5d4f4d504d8b0309c91f811050559300faba31258425f53c50852fc96f6ae574",
     archive: "raw",
     binary: "herdr",
   },
@@ -512,11 +513,32 @@ export function runInHerdrProject(worker, runtime, workspaceId, commandArgs) {
   return { focused: false };
 }
 
-// Ending an attachment is not a failure. Quitting Herdr exits 0; closing the
-// window or losing the link gives ssh's own 255, which looks identical to a
-// real network fault. So ask the desk whether it is still running before
-// deciding which one happened, instead of trusting the exit code alone.
+// Prefer Herdr's local thin-client architecture when the controller/worker pair
+// supports the pinned Windows bridge. Handoff still owns the Windows server,
+// config and persistence lifetime; the local Herdr process is only the renderer.
+// Any pre-launch compatibility failure falls back to the proven ssh-tty path in
+// auto mode. Tests can continue injecting backend.attach without touching the
+// real thin-client runtime.
 export function attachHerdr(worker, runtime, backend = {}) {
+  const healthy = backend.healthy ?? deskIsHealthy;
+  const transport = backend.transport ?? thinTransportMode();
+
+  if (!backend.attach && transport !== "legacy") {
+    const thin = attachThinHerdr(worker, runtime);
+    if (thin.available) {
+      const result = { code: thin.code, stdout: "", stderr: "" };
+      if (result.code === 0) return { ...result, desk: "quit", transport: "thin" };
+      if (healthy(worker, runtime)) return { ...result, desk: "detached", transport: "thin" };
+      fail(
+        `Lost the local thin-client connection to the persistent desk on ${worker.target} (exit ${result.code}).\n`
+        + "Try: hn doctor",
+      );
+    }
+    if (transport === "thin") {
+      fail(`Local Herdr thin client is unavailable: ${thin.reason}`);
+    }
+  }
+
   const script = herdrCommandScript(worker, runtime, []);
   const attach = backend.attach ?? (() => (worker.platform === "windows"
     // stdin belongs to the TUI, so the script has to travel in argv.
@@ -526,11 +548,10 @@ export function attachHerdr(worker, runtime, backend = {}) {
       { tty: true, allowFailure: true },
     )
     : runPosix(worker, script, { tty: true, allowFailure: true })));
-  const healthy = backend.healthy ?? deskIsHealthy;
 
   const result = attach();
-  if (result.code === 0) return { ...result, desk: "quit" };
-  if (healthy(worker, runtime)) return { ...result, desk: "detached" };
+  if (result.code === 0) return { ...result, desk: "quit", transport: "legacy" };
+  if (healthy(worker, runtime)) return { ...result, desk: "detached", transport: "legacy" };
   fail(
     `Lost the connection to the persistent desk on ${worker.target} (exit ${result.code}).\n`
     + "Try: hn doctor",
