@@ -54,6 +54,7 @@ import {
   HERDR_VERSION,
   attachHerdr,
   bootstrapHerdrProjectPane,
+  ensureHerdrConfig,
   ensureHerdrInstalled,
   ensureHerdrProject,
   ensureHerdrServer,
@@ -577,6 +578,11 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
     context = { ...context, worker };
   }
   const runtime = herdrRuntimeName(config.controllerId, context.name);
+  // The Herdr config, the pane shell shim, and shell.ps1 ship with Handoff, not
+  // with the pinned binary. Gating them on the install left every worker that
+  // already had Herdr on the old files, so its panes started a bare shell: no
+  // statusline, no Alt+Backspace.
+  ensureHerdrConfig(worker);
 
   // The desk probe has to happen anyway, so it carries the managed-file check.
   const roots = targetWorkspace(context).roots;
