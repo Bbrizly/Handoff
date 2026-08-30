@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { fail, quotePosix } from "./util.js";
+import { fail, quotePosix, quotePowerShell } from "./util.js";
 
 const POWERSHELL_SAFE_ENCODED_LENGTH = 6000;
 
@@ -90,9 +91,8 @@ export function powerShellInvocation(script) {
     "Text",
   ];
 
-  // Keep native commands away from the script transport stdin. Otherwise a
-  // command can consume the remainder of a large PowerShell program. A
-  // compressed loader normally stays below OpenSSH's argv limit.
+  // Windows OpenSSH rejects an over-long argv, so a big script travels
+  // compressed. That usually fits.
   if (encoded.length > POWERSHELL_SAFE_ENCODED_LENGTH) {
     const payload = gzipSync(Buffer.from(wrapped, "utf8")).toString("base64");
     const loader = `$hnBytes = [Convert]::FromBase64String('${payload}')
@@ -104,38 +104,27 @@ $hnReader.Dispose()
 . ([scriptblock]::Create($hnScript))`;
     encoded = encodePowerShell(loader);
     if (encoded.length <= POWERSHELL_SAFE_ENCODED_LENGTH) {
-      return { args: [...base, "-EncodedCommand", encoded], input: null };
+      return { args: [...base, "-EncodedCommand", encoded] };
     }
-    return {
-      args: [...base, "-Command", "-"],
-      input: wrapped,
-    };
+    // What is left is too big for argv. It used to travel on ssh stdin, where
+    // PowerShell read it, ran nothing, and exited 0, so the caller believed the
+    // script had worked. Send the script as a file instead.
+    return { file: wrapped };
   }
 
-  return {
-    args: [...base, "-EncodedCommand", encoded],
-    input: null,
-  };
+  return { args: [...base, "-EncodedCommand", encoded] };
 }
 
 export function runSsh(
   worker,
   remoteArgs = [],
-  { tty = false, capture = false, allowFailure = false, timeoutMs, input = null } = {},
+  { tty = false, capture = false, allowFailure = false, timeoutMs } = {},
 ) {
   const args = [...baseArgs(worker, tty), ...remoteArgs];
-  const hasInput = input !== null && input !== undefined;
-  const stdio = capture
-    ? [hasInput ? "pipe" : "ignore", "pipe", "pipe"]
-    : hasInput
-      ? ["pipe", "inherit", "inherit"]
-      : "inherit";
-
   const result = spawnSync("ssh", args, {
-    stdio,
+    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: capture ? "utf8" : undefined,
     timeout: timeoutMs,
-    input: hasInput ? input : undefined,
   });
 
   if (result.error) {
@@ -155,7 +144,41 @@ export function runSsh(
 
 export function runPowerShell(worker, script, options = {}) {
   const invocation = powerShellInvocation(script);
-  return runSsh(worker, invocation.args, { ...options, input: invocation.input });
+  if (invocation.file) return runPowerShellFile(worker, invocation.file, options);
+  return runSsh(worker, invocation.args, options);
+}
+
+// scp has no length limit and is the transport Handoff already trusts for its
+// assets. The remote name is random so two controllers cannot collide, and it
+// lands in the home directory because that is the one path known to exist.
+function runPowerShellFile(worker, script, options) {
+  const remote = `.hn-script-${randomBytes(8).toString("hex")}.ps1`;
+  const stage = mkdtempSync(join(tmpdir(), "hn-ps-"));
+  const local = join(stage, "script.ps1");
+  // The BOM is what makes Windows PowerShell read the file as UTF-8.
+  writeFileSync(local, `\uFEFF${script}`, "utf8");
+  try {
+    copyToWorker(worker, local, remote);
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+  // Read and run, never '&' or '-File': calling a .ps1 by path is what the
+  // worker's execution policy blocks, and it blocks it with an error record
+  // that leaves the exit code at 0.
+  const runner = `$hnScript = Join-Path $HOME ${quotePowerShell(remote)}
+$hnCode = 0
+try {
+  . ([scriptblock]::Create((Get-Content -LiteralPath $hnScript -Raw -ErrorAction Stop)))
+  if ($LASTEXITCODE) { $hnCode = $LASTEXITCODE }
+} catch {
+  Write-Error $_
+  $hnCode = 1
+} finally {
+  Remove-Item -LiteralPath $hnScript -Force -ErrorAction SilentlyContinue
+}
+exit $hnCode
+`;
+  return runSsh(worker, powerShellInvocation(runner).args, options);
 }
 
 export function runPosix(worker, script, options = {}) {
