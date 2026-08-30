@@ -147,12 +147,18 @@ $bridgeExe = Join-Path $bridgeRoot 'herdr.exe'
 $bridge = @{ state = 'missing'; version = ''; protocol = 0 }
 if (Test-Path -LiteralPath $bridgeExe -PathType Leaf) {
   try {
+    $env:HERDR_REMOTE_SIDECAR_V1 = '1'
+    Remove-Item Env:HERDR_ENV -ErrorAction SilentlyContinue
+    & $bridgeExe '--herdr-private-validate-remote-sidecar-v1' *> $null
+    if ($LASTEXITCODE -ne 0) { throw 'remote sidecar validation failed' }
     $version = (& $bridgeExe --version 2>&1 | Out-String).Trim()
     $clientRaw = (& $bridgeExe status client --json 2>$null | Out-String).Trim()
     $client = if ($clientRaw) { $clientRaw | ConvertFrom-Json } else { $null }
     $bridge = @{ state = 'ok'; version = $version; protocol = if ($client) { [int]$client.protocol } else { 0 } }
   } catch {
     $bridge = @{ state = 'broken'; version = ''; protocol = 0 }
+  } finally {
+    Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
   }
 }
 @{ server = $server; bridge = $bridge } | ConvertTo-Json -Depth 8 -Compress
@@ -186,14 +192,21 @@ try {
   Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
   $exe = Join-Path $stage 'herdr.exe'
   if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Pinned herdr-win archive has no top-level herdr.exe.' }
+  [IO.File]::WriteAllBytes((Join-Path $stage '.lease'), [byte[]]@())
+  $env:HERDR_REMOTE_SIDECAR_V1 = '1'
+  Remove-Item Env:HERDR_ENV -ErrorAction SilentlyContinue
+  & $exe '--herdr-private-validate-remote-sidecar-v1' *> $null
+  if ($LASTEXITCODE -ne 0) { throw 'Pinned herdr-win archive failed its sidecar payload validation.' }
   $version = (& $exe --version 2>&1 | Out-String).Trim()
   $clientRaw = (& $exe status client --json 2>$null | Out-String).Trim()
   $client = $clientRaw | ConvertFrom-Json
   if ($version -notlike '*${THIN_HERDR_RELEASE}*' -or $version -notlike '*${THIN_HERDR_UPSTREAM_VERSION}*' -or [int]$client.protocol -ne ${THIN_HERDR_PROTOCOL}) {
     throw 'Pinned herdr-win archive did not report the expected release/protocol.'
   }
+  Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $stage -Destination $target
 } finally {
+  Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
 }
