@@ -54,6 +54,10 @@ const HERDR_ASSETS = {
 
 const CONFIG_RELATIVE = ".hn/herdr/config.toml";
 
+export function herdrReleaseUrl(asset) {
+  return `https://github.com/herdrdev/herdr/releases/download/v${HERDR_VERSION}/${asset.file}`;
+}
+
 export function herdrAssetFor(platform, arch) {
   const normalized = platform === "win32" ? "windows" : platform;
   return HERDR_ASSETS[`${normalized}:${arch}`] ?? null;
@@ -229,7 +233,7 @@ export function ensureHerdrInstalled(worker, { quiet = true } = {}) {
     name: "herdr",
     version: HERDR_VERSION,
     file: asset.file,
-    url: `https://github.com/herdrdev/herdr/releases/download/v${HERDR_VERSION}/${asset.file}`,
+    url: herdrReleaseUrl(asset),
     sha256: asset.sha256,
   });
 

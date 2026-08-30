@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Real Mutagen + Zellij integration
+      - name: Runtime integration (Mutagen and Herdr)
         run: npm run test:integration
         env:
           HN_INTEGRATION: "1"

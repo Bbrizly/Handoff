@@ -9,65 +9,13 @@ Severity terminology:
 - **Medium** — important production gap, workaround exists.
 - **Low** — polish/coverage gap.
 
-## 1. Optional managed native-Windows Zellij persistence is not proven (historical)
+## 1. Zellij persistence was never proven, and is gone
 
-**Severity:** Medium experimental feature gap; no longer a core-path blocker
+**Severity:** Closed in 0.2.0
 
-**Status:** Root cause isolated; transparent terminal proven independently
+Managed native-Windows Zellij persistence never passed its close-terminal/reattach proof. Live forensics found the cause: WMI detachment worked, but a Session 0 attached Zellij anchor received closed input, its `cmd.exe` pane exited, and the server printed `Bye from Zellij!` about 260 ms after startup, so the next connection found nothing.
 
-The daily native-Windows path is proven: `hn pc` enters the mapped PowerShell PTY, Node reports `win32 x64`, Claude and Codex open interactively, and remote dev servers work through `hn port`.
-
-Only the explicit `hn session` backend remains unproven. Since Herdr became the `-p` persistent desk (HN-067), this section is history rather than current work. Zellij is not the persistence Handoff offers today.
-
-### Observed history
-
-Initial creation appeared to succeed, but immediate inspection failed:
-
-```text
-Zellij session '...' was created but could not be inspected
-There is no active session!
-```
-
-Improved diagnostics then showed:
-
-```text
-list-sessions: No active zellij sessions found.
-```
-
-A Windows process-lifetime workaround was introduced to detach session creation from the short-lived OpenSSH exec tree. Live forensics established that the broad process-lifetime hypothesis was wrong:
-
-- a WMI-created Session 0 sleeper executed and survived the originating SSH connection;
-- the exact Zellij anchor executed;
-- its non-interactive/closed input caused the initial `cmd.exe` pane to exit;
-- Zellij printed `Bye from Zellij!` and exited with code 0 about 260 ms after startup;
-- no server therefore remained for the next SSH connection to inspect.
-
-An earlier launcher transport also hit:
-
-```text
-The command line is too long.
-```
-
-The PowerShell transport was updated so oversized scripts can stream over SSH stdin instead of being placed in a giant `-EncodedCommand` argument.
-
-The remaining solution should use a supported headless layout or a tiny deterministic session host if Zellij still requires a durable console. It stays isolated behind `SessionBackend`; do not reintroduce it into `hn pc`.
-
-### Required proof
-
-After synchronization is healthy:
-
-```text
-1. hn session claude
-2. Claude opens on Windows
-3. close controller terminal
-4. open a new controller terminal
-5. run hn session claude from the same project
-6. same live Claude session reattaches
-```
-
-Only after this passes should native Windows persistence be marked solved.
-
-Session cleanup force-deletes the server, terminates an exact-match orphan only when it is Handoff's pinned Zellij binary, waits for asynchronous native-Windows shutdown, then removes the final resurrection record. Without that fallback and delay, a Session 0 server can rewrite the exited record after deletion. This prevents `hn sessions kill` from leaving an exited entry or hidden server process.
+Herdr replaced it as the `-p` persistent desk (HN-067). The legacy `hn session`, `hn new`, `hn attach`, and `hn sessions` commands and all Zellij code were removed in 0.2.0. See HN-076.
 
 ---
 
@@ -500,7 +448,6 @@ Also open:
 
 - **worker reboot is untested.** Nobody has rebooted the Lenovo and run `hn pc -p` afterwards. Herdr restores projects, tabs, panes, and cwd; arbitrary processes do not come back, and agent conversation resume needs Herdr's optional integrations, which Handoff does not install. Do not record this as solved;
 - terminal history across a server restart is deliberately left off. Saved screen contents can hold tokens and prompts;
-- `hn session`, `hn new`, and `hn attach` still use Zellij. They are the legacy surface, not the persistence Handoff offers, and are scheduled for removal;
 - moving a running `herdr.exe` aside leaves the old file locked by the running server until the desk restarts. Testing on 2026-08-28 left one such file behind; it clears on the next desk restart.
 
 Closed by testing on 2026-08-28:
@@ -556,3 +503,19 @@ node "C:/Users/Lenovo/.hn/claude-statusline.cjs"
 ```
 
 Verified on 2026-08-28 after many statusline refreshes. A recursive scan of `%USERPROFILE%`, `~/hn`, `~/.hn`, and `~/.claude` found zero files named `NUL`. A unit test asserts the generated settings script and command contain no `NUL` redirect.
+
+---
+
+## 23. A Herdr flag Handoff got wrong, and the check that now guards them
+
+`hn pc -p` failed on the Lenovo on 2026-08-30:
+
+```text
+hn: Herdr command failed (pane process-info wF:p1): unknown option: wF:p1
+```
+
+`herdr pane process-info` takes `--pane <ID>`. Every neighbouring command takes the id positionally (`pane run <PANE_ID>`, `agent focus <target>`, `workspace focus <workspace_id>`), so the call site matched its neighbours instead of the help text. The path is Windows-only and runs during desk bootstrap, so no controller test could reach it.
+
+All eleven other Herdr command lines were checked against the pinned 0.8.2 binary and are correct.
+
+`test/integration/herdr.integration.test.js` now downloads pinned Herdr on the controller and runs `--help` for every command Handoff builds, asserting the positional count and each flag. It runs in CI on ubuntu and macos. Reverting the fix fails it.
