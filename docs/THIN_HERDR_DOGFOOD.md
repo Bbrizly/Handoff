@@ -16,28 +16,32 @@ git rev-parse origin/feat/local-herdr-thin-client
 
 If the working tree has unrelated changes, stop before switching branches or resetting anything. Never discard or stash user work automatically.
 
-For the cleanest dogfood environment, create a detached worktree from the feature branch so the normal checkout and `main` are untouched:
+For the cleanest dogfood environment, create a detached worktree from the feature branch **outside every synchronized workspace** so the normal checkout, `main`, and the shared project tree are untouched:
 
 ```bash
-DOGFOOD="$HOME/GitHub/Handoff-thin-dogfood"
+DOGFOOD="$HOME/.hn/dogfood/Handoff-thin"
+mkdir -p "$(dirname "$DOGFOOD")"
 git worktree add --detach "$DOGFOOD" origin/feat/local-herdr-thin-client
 cd "$DOGFOOD"
 node --version
 npm test
 npm run check
-```
-
-Node must be 20 or newer.
-
-The runner can be invoked from any synchronized project without installing/linking this checkout globally:
-
-```bash
 HN="$DOGFOOD/src/index.js"
 ```
 
+Node must be 20 or newer. Do not place this worktree under `~/GitHub` (or another configured Handoff root), because that would synchronize the dogfood checkout back to the worker and create a useless extra project.
+
+The runner can be invoked from any real synchronized project without installing/linking this checkout globally.
+
 ## 2. Confirm the existing Handoff worker before changing anything
 
-From a project already inside the configured workspace:
+Change back to the actual project you want to test inside the configured Handoff workspace, for example:
+
+```bash
+cd ~/GitHub/Handoff
+```
+
+Then:
 
 ```bash
 node "$HN" worker list
