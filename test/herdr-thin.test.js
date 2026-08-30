@@ -57,7 +57,7 @@ test("Windows thin attach accepts only streaming-safe OpenSSH shells", () => {
   assert.equal(thinWindowsSshShellCompatible(""), false);
 });
 
-test("thin attach requires the exact existing Handoff session and detached official server", () => {
+test("thin attach requires the exact existing Handoff session and a compatible official server", () => {
   const runtime = "hn-12345678-main";
   const good = {
     status: "running",
@@ -66,13 +66,36 @@ test("thin attach requires the exact existing Handoff session and detached offic
     protocol: 20,
     session: runtime,
     socket: `C:\\Users\\dev\\AppData\\Roaming\\herdr\\sessions\\${runtime}\\herdr.sock`,
-    capabilities: { detached_server_daemon: true },
+    compatible: true,
+    restart_needed: false,
+    capabilities: { live_handoff: false, detached_server_daemon: false },
   };
   assert.equal(thinServerCompatible(good, runtime), true);
   assert.equal(thinServerCompatible({ ...good, protocol: 19 }, runtime), false);
   assert.equal(thinServerCompatible({ ...good, version: "0.8.1" }, runtime), false);
   assert.equal(thinServerCompatible({ ...good, session: "other" }, runtime), false);
-  assert.equal(thinServerCompatible({ ...good, capabilities: { detached_server_daemon: false } }, runtime), false);
+  assert.equal(thinServerCompatible({ ...good, running: false, status: "not_running" }, runtime), false);
+  assert.equal(thinServerCompatible({ ...good, compatible: false }, runtime), false);
+  assert.equal(thinServerCompatible({ ...good, restart_needed: true }, runtime), false);
+});
+
+// Real hardware, 2026-08-30: the Windows 0.8.2 desk reports both remote
+// capabilities false, and a clean macOS 0.8.2 server does the same. A gate on
+// detached_server_daemon could never pass, so thin mode never engaged.
+test("the pinned Herdr never reports detached_server_daemon, so it cannot gate attach", () => {
+  const runtime = "hn-9620c868-main";
+  const observed = {
+    status: "running",
+    running: true,
+    version: "0.8.2",
+    protocol: 20,
+    capabilities: { live_handoff: false, detached_server_daemon: false },
+    compatible: true,
+    socket: `C:\\Users\\Lenovo\\AppData\\Roaming\\herdr\\sessions\\${runtime}\\herdr.sock`,
+    session: runtime,
+    restart_needed: false,
+  };
+  assert.equal(thinServerCompatible(observed, runtime), true);
 });
 
 test("thin bridge derives only the client socket beside the proven API socket", () => {

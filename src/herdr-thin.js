@@ -106,13 +106,19 @@ export function thinWindowsSshShellCompatible(value) {
   return ["cmd", "cmd.exe", "pwsh", "pwsh.exe"].includes(name);
 }
 
+// `capabilities.detached_server_daemon` is not a gate. It belongs to Herdr's
+// RemoteServerCapabilities, which describe `herdr --remote`, and 0.8.2 reports
+// it false on every platform, so requiring it made thin mode unreachable.
+// `compatible` and `restart_needed` are Herdr's own verdict on whether a client
+// may attach to this server, so use those instead.
 export function thinServerCompatible(server, runtime = null) {
   return Boolean(
     server?.running
     && server?.status === "running"
     && String(server.version ?? "") === THIN_HERDR_VERSION
     && Number(server.protocol) === THIN_HERDR_PROTOCOL
-    && server?.capabilities?.detached_server_daemon === true
+    && server?.compatible === true
+    && server?.restart_needed !== true
     && (!runtime || String(server.session ?? "") === runtime),
   );
 }
