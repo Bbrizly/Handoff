@@ -1,5 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { fail, quotePosix } from "./util.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
+import { fail, quotePosix, quotePowerShell } from "./util.js";
 
 const POWERSHELL_SAFE_ENCODED_LENGTH = 6000;
 
@@ -46,6 +51,8 @@ export function parseSshTarget(input) {
 }
 
 function connectionArgs(worker) {
+  const controlDir = join(homedir(), ".hn", "state");
+  mkdirSync(controlDir, { recursive: true, mode: 0o700 });
   return [
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=5",
@@ -53,6 +60,9 @@ function connectionArgs(worker) {
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ServerAliveInterval=5",
     "-o", "ServerAliveCountMax=3",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=60",
+    "-o", `ControlPath=${join(controlDir, "ssh-%C")}`,
   ];
 }
 
@@ -71,7 +81,7 @@ export function encodePowerShell(script) {
 
 export function powerShellInvocation(script) {
   const wrapped = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
-  const encoded = encodePowerShell(wrapped);
+  let encoded = encodePowerShell(wrapped);
   const base = [
     "powershell.exe",
     "-NoLogo",
@@ -81,39 +91,40 @@ export function powerShellInvocation(script) {
     "Text",
   ];
 
-  // Windows/OpenSSH can reject large remote argv strings before PowerShell ever
-  // starts. Keep normal commands encoded, but stream oversized scripts on stdin.
+  // Windows OpenSSH rejects an over-long argv, so a big script travels
+  // compressed. That usually fits.
   if (encoded.length > POWERSHELL_SAFE_ENCODED_LENGTH) {
-    return {
-      args: [...base, "-Command", "-"],
-      input: wrapped,
-    };
+    const payload = gzipSync(Buffer.from(wrapped, "utf8")).toString("base64");
+    const loader = `$hnBytes = [Convert]::FromBase64String('${payload}')
+$hnInput = New-Object IO.MemoryStream(,$hnBytes)
+$hnGzip = New-Object IO.Compression.GzipStream($hnInput, [IO.Compression.CompressionMode]::Decompress)
+$hnReader = New-Object IO.StreamReader($hnGzip, [Text.Encoding]::UTF8)
+$hnScript = $hnReader.ReadToEnd()
+$hnReader.Dispose()
+. ([scriptblock]::Create($hnScript))`;
+    encoded = encodePowerShell(loader);
+    if (encoded.length <= POWERSHELL_SAFE_ENCODED_LENGTH) {
+      return { args: [...base, "-EncodedCommand", encoded] };
+    }
+    // What is left is too big for argv. It used to travel on ssh stdin, where
+    // PowerShell read it, ran nothing, and exited 0, so the caller believed the
+    // script had worked. Send the script as a file instead.
+    return { file: wrapped };
   }
 
-  return {
-    args: [...base, "-EncodedCommand", encoded],
-    input: null,
-  };
+  return { args: [...base, "-EncodedCommand", encoded] };
 }
 
 export function runSsh(
   worker,
   remoteArgs = [],
-  { tty = false, capture = false, allowFailure = false, timeoutMs, input = null } = {},
+  { tty = false, capture = false, allowFailure = false, timeoutMs } = {},
 ) {
   const args = [...baseArgs(worker, tty), ...remoteArgs];
-  const hasInput = input !== null && input !== undefined;
-  const stdio = capture
-    ? [hasInput ? "pipe" : "ignore", "pipe", "pipe"]
-    : hasInput
-      ? ["pipe", "inherit", "inherit"]
-      : "inherit";
-
   const result = spawnSync("ssh", args, {
-    stdio,
+    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: capture ? "utf8" : undefined,
     timeout: timeoutMs,
-    input: hasInput ? input : undefined,
   });
 
   if (result.error) {
@@ -133,7 +144,41 @@ export function runSsh(
 
 export function runPowerShell(worker, script, options = {}) {
   const invocation = powerShellInvocation(script);
-  return runSsh(worker, invocation.args, { ...options, input: invocation.input });
+  if (invocation.file) return runPowerShellFile(worker, invocation.file, options);
+  return runSsh(worker, invocation.args, options);
+}
+
+// scp has no length limit and is the transport Handoff already trusts for its
+// assets. The remote name is random so two controllers cannot collide, and it
+// lands in the home directory because that is the one path known to exist.
+function runPowerShellFile(worker, script, options) {
+  const remote = `.hn-script-${randomBytes(8).toString("hex")}.ps1`;
+  const stage = mkdtempSync(join(tmpdir(), "hn-ps-"));
+  const local = join(stage, "script.ps1");
+  // The BOM is what makes Windows PowerShell read the file as UTF-8.
+  writeFileSync(local, `\uFEFF${script}`, "utf8");
+  try {
+    copyToWorker(worker, local, remote);
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+  // Read and run, never '&' or '-File': calling a .ps1 by path is what the
+  // worker's execution policy blocks, and it blocks it with an error record
+  // that leaves the exit code at 0.
+  const runner = `$hnScript = Join-Path $HOME ${quotePowerShell(remote)}
+$hnCode = 0
+try {
+  . ([scriptblock]::Create((Get-Content -LiteralPath $hnScript -Raw -ErrorAction Stop)))
+  if ($LASTEXITCODE) { $hnCode = $LASTEXITCODE }
+} catch {
+  Write-Error $_
+  $hnCode = 1
+} finally {
+  Remove-Item -LiteralPath $hnScript -Force -ErrorAction SilentlyContinue
+}
+exit $hnCode
+`;
+  return runSsh(worker, powerShellInvocation(runner).args, options);
 }
 
 export function runPosix(worker, script, options = {}) {

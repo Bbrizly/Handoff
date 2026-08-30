@@ -12,8 +12,10 @@ import { join } from "node:path";
 import { copyToWorker, encodePowerShell, runPosix, runPowerShell, runSsh } from "./ssh.js";
 import { ensureCachedRelease, runLocal } from "./runtime-assets.js";
 import { remotePathExpression } from "./worker.js";
+import { windowsPowerShellBootstrapCommand, windowsShellBootstrapScript } from "./remote.js";
 import { windowsDetachedLaunchScript } from "./windows-detach.js";
 import { fail, quotePosix, quotePowerShell, shortHash, slug } from "./util.js";
+import { HANDOFF_CLAUDE_SETTINGS_TOKEN, MANAGED_REPAIR_MARKER } from "./statusline.js";
 
 export const HERDR_VERSION = "0.8.2";
 
@@ -52,6 +54,10 @@ const HERDR_ASSETS = {
 
 const CONFIG_RELATIVE = ".hn/herdr/config.toml";
 
+export function herdrReleaseUrl(asset) {
+  return `https://github.com/herdrdev/herdr/releases/download/v${HERDR_VERSION}/${asset.file}`;
+}
+
 export function herdrAssetFor(platform, arch) {
   const normalized = platform === "win32" ? "windows" : platform;
   return HERDR_ASSETS[`${normalized}:${arch}`] ?? null;
@@ -73,7 +79,13 @@ export function herdrRuntimeName(controllerId, workspaceName) {
 }
 
 // Handoff owns this file. The user's own ~/.config/herdr/config.toml is left alone.
-export function herdrConfigToml() {
+export function herdrConfigToml(platform = undefined) {
+  const terminal = platform === "windows"
+    ? `
+[terminal]
+default_shell = "~/.hn/bin/hn-powershell.cmd"
+`
+    : "";
   return `# Written by Handoff (hn). Your own Herdr config is untouched.
 onboarding = false
 
@@ -102,6 +114,7 @@ rows = [["state_icon", "workspace"]]
 [ui.sidebar.agents]
 row_gap = 0
 rows = [["state_icon", "workspace"], ["agent", "state_text"]]
+${terminal}
 `;
 }
 
@@ -186,12 +199,18 @@ function extractHerdr(asset, archivePath) {
 }
 
 export function ensureHerdrConfig(worker) {
-  const toml = herdrConfigToml();
+  const toml = herdrConfigToml(worker.platform);
   if (worker.platform === "windows") {
     runPowerShell(worker, `$ErrorActionPreference = 'Stop'
 $hnDir = ${remotePathExpression(".hn/herdr")}
 New-Item -ItemType Directory -Force -Path $hnDir | Out-Null
 Set-Content -LiteralPath ${remotePathExpression(CONFIG_RELATIVE)} -Value ${quotePowerShell(toml)} -Encoding utf8
+$hnBin = ${remotePathExpression(".hn/bin")}
+New-Item -ItemType Directory -Force -Path $hnBin | Out-Null
+$hnShell = ${remotePathExpression(".hn/bin/hn-powershell.cmd")}
+Set-Content -LiteralPath $hnShell -Value ${quotePowerShell(windowsPowerShellBootstrapCommand())} -Encoding ascii
+$hnBootstrap = ${remotePathExpression(".hn/shell.ps1")}
+Set-Content -LiteralPath $hnBootstrap -Value ${quotePowerShell(windowsShellBootstrapScript())} -Encoding utf8
 `);
     return;
   }
@@ -214,7 +233,7 @@ export function ensureHerdrInstalled(worker, { quiet = true } = {}) {
     name: "herdr",
     version: HERDR_VERSION,
     file: asset.file,
-    url: `https://github.com/herdrdev/herdr/releases/download/v${HERDR_VERSION}/${asset.file}`,
+    url: herdrReleaseUrl(asset),
     sha256: asset.sha256,
   });
 
@@ -226,11 +245,22 @@ export function ensureHerdrInstalled(worker, { quiet = true } = {}) {
 New-Item -ItemType Directory -Force -Path ${remotePathExpression(".hn/cache")} | Out-Null
 `);
     copyToWorker(worker, archivePath, remoteZip);
+    // Expanding straight over the install directory fails once a desk is
+    // running: its ConPTY DLLs are locked. Those locked files are already the
+    // right ones, so unpack beside them and copy what will move. The version
+    // check below is what decides whether the install actually worked.
     runPowerShell(worker, `$ErrorActionPreference = 'Stop'
 $hnTarget = ${remotePathExpression(herdrInstallDir())}
+$hnStage = Join-Path $env:TEMP ('hn-herdr-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $hnTarget | Out-Null
-Expand-Archive -LiteralPath ${remotePathExpression(remoteZip)} -DestinationPath $hnTarget -Force
-Remove-Item -LiteralPath ${remotePathExpression(remoteZip)} -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $hnStage | Out-Null
+try {
+  Expand-Archive -LiteralPath ${remotePathExpression(remoteZip)} -DestinationPath $hnStage -Force
+  Copy-Item -Path (Join-Path $hnStage '*') -Destination $hnTarget -Recurse -Force -ErrorAction SilentlyContinue
+} finally {
+  Remove-Item -LiteralPath $hnStage -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath ${remotePathExpression(remoteZip)} -Force -ErrorAction SilentlyContinue
+}
 `);
   } else {
     const extracted = extractHerdr(asset, archivePath);
@@ -254,16 +284,46 @@ Remove-Item -LiteralPath ${remotePathExpression(remoteZip)} -Force -ErrorAction 
   }
 }
 
+// One round trip answers two questions: is the desk up, and are Handoff's
+// managed files still on the worker. The guard is optional so callers that do
+// not care pay nothing for it.
+const HERDR_MISSING_MARKER = "hn-no-herdr";
+
+export function probeHerdrDesk(worker, runtime, guard = "", run = null) {
+  const binary = herdrBinaryRelative(worker);
+  const presence = worker.platform === "windows"
+    ? `if (-not (Test-Path -LiteralPath ${remotePathExpression(binary)} -PathType Leaf)) { Write-Output '${HERDR_MISSING_MARKER}'; exit 0 }\n`
+    : `[ -x "$HOME/${binary}" ] || { echo ${HERDR_MISSING_MARKER}; exit 0; }\n`;
+  const script = guard + presence + herdrCommandScript(worker, runtime, ["workspace", "list"]);
+  const options = { capture: true, allowFailure: true, timeoutMs: 15000 };
+  const result = run
+    ? run(script)
+    : worker.platform === "windows"
+      ? runPowerShell(worker, script, options)
+      : runPosix(worker, script, options);
+  return {
+    installed: !result.stdout.includes(HERDR_MISSING_MARKER),
+    running: result.code === 0 && result.stdout.includes("workspace_list"),
+    repairNeeded: result.stdout.includes(MANAGED_REPAIR_MARKER),
+  };
+}
+
 function serverIsRunning(worker, runtime) {
-  const result = runHerdr(worker, runtime, ["workspace", "list"], {
+  return probeHerdrDesk(worker, runtime).running;
+}
+
+// Cheap enough to run after a broken attachment: it asks the desk itself, not
+// the network, whether anything is actually wrong.
+export function deskIsHealthy(worker, runtime) {
+  const result = runHerdr(worker, runtime, ["status", "server"], {
     capture: true,
     allowFailure: true,
     timeoutMs: 15000,
   });
-  return result.code === 0 && result.stdout.includes("workspace_list");
+  return result.code === 0 && /status:\s*running/.test(result.stdout);
 }
 
-export function ensureHerdrServer(worker, runtime) {
+export function ensureHerdrServer(worker, runtime, { agentDirectories = [], claudeSettings = "" } = {}) {
   if (serverIsRunning(worker, runtime)) return;
 
   if (worker.platform === "windows") {
@@ -273,9 +333,15 @@ export function ensureHerdrServer(worker, runtime) {
     const child = `$ErrorActionPreference = 'Stop'
 ${windowsPrelude(worker, runtime)}& $hnHerdr --session $hnSession server
 `;
+    const absoluteDirectories = agentDirectories
+      .map((directory) => `(Join-Path $HOME ${quotePowerShell(directory.replaceAll("/", "\\"))})`)
+      .join(", ");
+    const environment = `$env:HN_HANDOFF_AGENT_DIRECTORIES = @(${absoluteDirectories}) -join [IO.Path]::PathSeparator
+$env:HN_HANDOFF_CLAUDE_SETTINGS = ${claudeSettings ? quotePowerShell(claudeSettings) : "''"}
+`;
     runPowerShell(
       worker,
-      windowsDetachedLaunchScript(child, { marker: "hn-desk" }),
+      windowsDetachedLaunchScript(environment + child, { marker: "hn-desk" }),
       { capture: true },
     );
   } else {
@@ -359,19 +425,64 @@ function agentKind(command) {
   return name === "cursor-agent" ? "cursor" : name;
 }
 
-// The pane runs a real shell, so arguments need that shell's quoting. The
-// command name stays bare or the shell prints it instead of running it.
-// ponytail: an executable path containing spaces is not handled.
-function paneCommandLine(worker, commandArgs) {
+// The pane runs a real shell, so arguments need that shell's quoting. Windows
+// needs the call operator in front, or PowerShell prints a quoted path instead
+// of running it.
+export function paneCommandLine(worker, commandArgs) {
   const [command, ...rest] = commandArgs;
   const quote = worker.platform === "windows" ? quotePowerShell : quotePosix;
-  return [command, ...rest.map(quote)].join(" ");
+  const quotedRest = rest.map((arg) => {
+    if (arg !== HANDOFF_CLAUDE_SETTINGS_TOKEN) return quote(arg);
+    return worker.platform === "windows"
+      ? "(Join-Path $HOME '.hn\\claude-settings.json')"
+      : '"$HOME/.hn/claude-settings.json"';
+  });
+  if (worker.platform === "windows") return ["&", quote(command), ...quotedRest].join(" ");
+  return [quote(command), ...quotedRest].join(" ");
 }
 
 function projectPane(worker, runtime, workspaceId) {
   const panes = herdrJson(worker, runtime, ["pane", "list", "--workspace", workspaceId])
     ?.result?.panes ?? [];
   return panes.find((pane) => pane.focused) ?? panes[0] ?? null;
+}
+
+function processName(value) {
+  return String(value ?? "").split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
+}
+
+// Herdr nests this one reply a level deeper than the rest. Reading
+// result.foreground_processes gave an empty list every time, which read as
+// "this pane is busy", so no pane was ever bootstrapped.
+export function paneForegroundProcesses(reply) {
+  return reply?.result?.process_info?.foreground_processes ?? [];
+}
+
+// A pane can only be bootstrapped safely while its foreground process is the
+// shell itself. Never write into a live agent, build, server, or other tool.
+export function bootstrapIdleWindowsPane(worker, runtime, pane, { agentDirectories = [], claudeSettings = "" } = {}) {
+  if (worker.platform !== "windows" || pane?.agent) return false;
+  const processes = paneForegroundProcesses(
+    herdrJson(worker, runtime, ["pane", "process-info", "--pane", pane.pane_id]),
+  );
+  if (!processes.length || processes.some((process) => !["powershell", "pwsh"].includes(processName(process.name)))) {
+    return false;
+  }
+  const settings = claudeSettings ? quotePowerShell(claudeSettings) : "''";
+  const absoluteDirectories = agentDirectories
+    .map((directory) => `(Join-Path $HOME ${quotePowerShell(directory.replaceAll("/", "\\"))})`)
+    .join(", ");
+  const command = `$env:HN_HANDOFF_AGENT_DIRECTORIES = @(${absoluteDirectories}) -join [IO.Path]::PathSeparator; $env:HN_HANDOFF_CLAUDE_SETTINGS = ${settings}; . (Join-Path $HOME '.hn\\shell.ps1')`;
+  const result = runHerdr(worker, runtime, ["pane", "run", pane.pane_id, command], {
+    capture: true,
+    allowFailure: true,
+  });
+  return result.code === 0;
+}
+
+export function bootstrapHerdrProjectPane(worker, runtime, workspaceId, options = {}) {
+  const pane = projectPane(worker, runtime, workspaceId);
+  return pane ? bootstrapIdleWindowsPane(worker, runtime, pane, options) : false;
 }
 
 // 'hn pc -p claude' should return to the Claude already running in this project
@@ -401,17 +512,29 @@ export function runInHerdrProject(worker, runtime, workspaceId, commandArgs) {
   return { focused: false };
 }
 
-export function attachHerdr(worker, runtime) {
+// Ending an attachment is not a failure. Quitting Herdr exits 0; closing the
+// window or losing the link gives ssh's own 255, which looks identical to a
+// real network fault. So ask the desk whether it is still running before
+// deciding which one happened, instead of trusting the exit code alone.
+export function attachHerdr(worker, runtime, backend = {}) {
   const script = herdrCommandScript(worker, runtime, []);
-  if (worker.platform === "windows") {
+  const attach = backend.attach ?? (() => (worker.platform === "windows"
     // stdin belongs to the TUI, so the script has to travel in argv.
-    return runSsh(
+    ? runSsh(
       worker,
       ["powershell.exe", "-NoLogo", "-NoProfile", "-EncodedCommand", encodePowerShell(script)],
-      { tty: true },
-    );
-  }
-  return runPosix(worker, script, { tty: true });
+      { tty: true, allowFailure: true },
+    )
+    : runPosix(worker, script, { tty: true, allowFailure: true })));
+  const healthy = backend.healthy ?? deskIsHealthy;
+
+  const result = attach();
+  if (result.code === 0) return { ...result, desk: "quit" };
+  if (healthy(worker, runtime)) return { ...result, desk: "detached" };
+  fail(
+    `Lost the connection to the persistent desk on ${worker.target} (exit ${result.code}).\n`
+    + "Try: hn doctor",
+  );
 }
 
 export function stopHerdrServer(worker, runtime) {

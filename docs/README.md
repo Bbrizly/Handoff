@@ -12,6 +12,7 @@ The implementation is the source of truth for current behavior. These documents 
 4. [CLI.md](./CLI.md) — command/UX contract for `hn`.
 5. [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) — issues proven by real hardware testing and the intended fixes.
 6. [ROADMAP.md](./ROADMAP.md) — ordered product and engineering roadmap.
+7. [LAUNCH.md](./LAUNCH.md) — launch positioning, demo plan, and the claims that must not be made.
 
 ## Product in one sentence
 

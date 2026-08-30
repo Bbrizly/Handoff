@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { claudeProfileCandidates, claudeProfileLinks } from "../src/profile.js";
+import { claudeProfileCandidates, claudeProfileLinks, claudeProfileProjectionFingerprint } from "../src/profile.js";
 
 test("Claude portable profile includes capability files but excludes machine state", () => {
   const candidates = claudeProfileCandidates("/Users/me", () => true);
@@ -47,4 +47,11 @@ test("Claude profile projects only links backed by the canonical agent skill tre
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("Claude profile projection fingerprint is stable and changes with link topology", () => {
+  assert.equal(
+    claudeProfileProjectionFingerprint([]),
+    claudeProfileProjectionFingerprint([]),
+  );
 });

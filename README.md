@@ -1,6 +1,11 @@
-# hn
+# Handoff
 
-Local files. Compute anywhere.
+[![CI](https://github.com/Bbrizly/Handoff/actions/workflows/ci.yml/badge.svg)](https://github.com/Bbrizly/Handoff/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
+Your files and your Git stay on your laptop. Your compute happens somewhere else.
+
+Handoff (`hn`) synchronizes a workspace you choose to any SSH-reachable machine and drops you into a real shell in the matching directory. Agents, builds, tests, dev servers, and GPU work run there. Your editor, your working tree, and your `.git` never move.
 
 ```text
 Mac                                  pc / home / aws
@@ -11,16 +16,31 @@ hn + Mutagen  ---------------------> Claude / Codex / builds
 localhost       <------------------- dev servers
 ```
 
+Day to day:
+
+```bash
+cd ~/GitHub/Palmier
+hn pc
+```
+
+You are now in `~/hn/main/GitHub/Palmier` on the other machine, in a native shell, with the files already there.
+
+## What it does
+
+Handoff wires together SSH, path mapping, bidirectional sync, and port forwarding so you stop running them by hand. The controller keeps the canonical working tree and the only `.git`, so remote edits arrive locally as ordinary Git changes. A Windows worker needs OpenSSH Server and nothing else.
+
+The scope stops there. Handoff moves commands, not your editor, your repository, or your environment. There is no Handoff server, no account, and no hosted backend, and it will not provision machines for you.
+
 ## Product docs
 
 The canonical product and engineering specification lives in [`docs/`](./docs/README.md):
 
-- [`docs/PRD.md`](./docs/PRD.md) — what Handoff is, requirements, scope, non-goals, and success criteria.
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — controller/worker, sync, Git, sessions, Windows, networking, and security architecture.
-- [`docs/DECISIONS.md`](./docs/DECISIONS.md) — accepted, rejected, deferred, and still-unproven design decisions.
-- [`docs/CLI.md`](./docs/CLI.md) — `hn` command and UX contract.
-- [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) — real hardware findings and current blockers.
-- [`docs/ROADMAP.md`](./docs/ROADMAP.md) — ordered path to v1 and later capabilities.
+- [`docs/PRD.md`](./docs/PRD.md): what Handoff is, requirements, scope, non-goals, and success criteria.
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md): controller/worker, sync, Git, sessions, Windows, networking, and security architecture.
+- [`docs/DECISIONS.md`](./docs/DECISIONS.md): accepted, rejected, deferred, and still-unproven design decisions.
+- [`docs/CLI.md`](./docs/CLI.md): `hn` command and UX contract.
+- [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md): real hardware findings and current blockers.
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md): ordered path to v1 and later capabilities.
 
 When changing the product architecture, update the decision ledger instead of relying on chat/history as the source of truth.
 
@@ -154,7 +174,6 @@ codex
 npm run dev
 python script.py
 docker compose up
-zellij
 ```
 
 Direct local forms such as `hn pc claude` use the same mapped PTY without creating a hidden session. That terminal is disposable: close it and the remote command goes with it.
@@ -173,13 +192,33 @@ That opens a desk: every synchronized project on that machine in one sidebar, wi
 
 The desk runs on [Herdr](https://herdr.dev), pinned and checksum-verified like everything else Handoff installs. Nothing installs it until your first `-p`.
 
+Closing an attachment is not an error. Handoff asks the desk whether it is still running and says so:
+
+```text
+desk still running on pc. 'hn pc -p' comes back to it
+```
+
+If the desk really is gone, it says that instead.
+
+Persistent mode reads what panes are printing on the worker. That is how it knows an agent is blocked or working. That state stays on the worker and nothing is uploaded anywhere. Plain `hn pc` does none of it.
+
+## Claude on a worker looks like Claude at home
+
+When Handoff starts Claude on a worker it passes its own settings file, so the worker's own `~/.claude/settings.json` is never touched. That file gives Claude the same statusline you have locally: same segments, same order, same colours, same context and usage percentages, same model and directory formatting.
+
+One part is honestly different. `.git` stays on the controller, so the worker has no repository to read. The branch and dirty-file segments fall back to the same dim placeholders the local script already uses when it finds no repository. Nothing is invented to fill the space.
+
+Handoff owns two files for this, `~/.hn/claude-statusline.cjs` and `~/.hn/claude-settings.json`, plus the profile links it projects. It caches the fact that they are in place so a normal launch is fast. Before starting Claude it still asks the worker whether they are actually there, and puts back anything that went missing:
+
+```text
+worker is missing Handoff's managed Claude files; restoring...
+```
+
 Other useful commands:
 
 ```bash
 hn shell
 hn exec npm test
-hn sessions
-hn attach <session>
 hn port 5173
 hn doctor
 hn sync
@@ -202,16 +241,32 @@ Because remote Codex has no `.git`, `hn` automatically supplies Codex's `--skip-
 - native Windows over OpenSSH / PowerShell
 - Linux over SSH
 - macOS over SSH
-- x64 and arm64 where an official Zellij build exists
+- x64 and arm64 where an official Herdr build exists
 
 Windows does **not** require WSL.
 
-## Current caveat
+## What is proven, and what is not
 
-Mutagen documents historical performance/stalling issues with Microsoft's Windows OpenSSH server. The architecture avoids extra Windows setup, but real performance still depends on the actual Windows SSH endpoint. `hn doctor` checks connectivity and required worker tools.
+Proven on the reference setup, a macOS controller and a native Windows worker:
 
-The transparent native-Windows terminal is proven on the reference Lenovo with Node, Claude, Codex, Vite, bidirectional sync, and port forwarding. Optional Handoff-managed native-Windows Zellij persistence remains experimental; users can run Zellij manually inside `hn pc` without making it a core dependency. See [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md).
+- the mapped interactive terminal, with Node reporting `win32 x64`, Claude and Codex opening interactively, a Vite dev server running remotely, and `hn port` exposing it through Mac localhost;
+- bidirectional sync with the safety gate refusing to start remote work on an unhealthy workspace;
+- the `-p` desk: project switching, agent reuse without duplicates, survival across repeated disconnects, and recovery after a managed file or the Herdr binary is deleted.
+
+Not proven, and not claimed:
+
+- **worker reboot.** Nobody has rebooted the worker and run `hn pc -p` afterwards. Herdr restores projects, tabs, panes, and cwd. Arbitrary processes do not come back.
+- **a person living in the desk.** Every mechanical step passes. An afternoon of real use has not happened yet.
+- **controllers other than macOS.** The managed Mutagen bootstrap is controller-platform-limited today.
+
+Mutagen documents historical performance and stalling issues with Microsoft's Windows OpenSSH server. The architecture avoids extra Windows setup, but real performance still depends on the actual Windows SSH endpoint. `hn doctor` checks connectivity and required worker tools.
+
+Deferred, and not in progress: a remote Git bridge, automatic port discovery, toolchain installation, an MCP bridge, and first-class conflict resolution commands. See [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) and [`docs/ROADMAP.md`](./docs/ROADMAP.md).
 
 ## Third-party software
 
 See `THIRD_PARTY_NOTICES.md`.
+
+## License
+
+MIT. See [`LICENSE`](./LICENSE).

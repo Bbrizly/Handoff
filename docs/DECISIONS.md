@@ -134,7 +134,7 @@ Rejected workaround: solve Windows session persistence by routing all Windows us
 
 ## HN-010 — Zellij is the persistent-session backend
 
-**Status:** Superseded as a core dependency by HN-059; retained as an optional backend
+**Status:** Superseded by HN-076; Zellij was removed in 0.2.0
 
 Zellij was selected over tmux because:
 
@@ -151,7 +151,7 @@ Rejected: tmux as the universal backend.
 
 ## HN-011 — Persistent sessions are keyed by project + target + command context
 
-**Status:** Accepted for explicit persistent sessions; not a requirement of the transparent terminal
+**Status:** Superseded by HN-068 and HN-076; the desk keys a project by label first, token second for explicit persistent sessions; not a requirement of the transparent terminal
 
 A normal persistent command should reconnect to the same logical session.
 
@@ -171,15 +171,15 @@ Identity includes:
 
 **Status:** Accepted for explicit persistent sessions; not a requirement of the transparent terminal
 
-This remains the contract for `hn session`, but it no longer gates the core `hn pc` transparent terminal. A direct SSH PTY naturally ends when its controller terminal disconnects.
+This remains the contract for the persistent desk (`-p`), but it no longer gates the core `hn pc` transparent terminal. A direct SSH PTY naturally ends when its controller terminal disconnects.
 
 Success test:
 
 ```text
-hn session claude
+hn pc -p claude
 → close local terminal
 → open another terminal
-→ hn session claude
+→ hn pc -p claude
 → same remote Claude session returns
 ```
 
@@ -498,7 +498,7 @@ Accepted fix direction: stream oversized scripts over SSH stdin instead of expan
 
 ## HN-034 — Pin one stable Zellij socket/runtime directory on Windows
 
-**Status:** Provisional / implemented
+**Status:** Obsolete; removed with Zellij in 0.2.0 (HN-076)
 
 Windows Zellij invocations use a stable Handoff-owned runtime path under `~/.hn` so create/inspect/control/attach calls made through separate SSH invocations can discover the same session.
 
@@ -508,7 +508,7 @@ This is part of the current native-Windows persistence work and remains subject 
 
 ## HN-035 — Native Windows Zellij creation may need to escape the OpenSSH process lifetime
 
-**Status:** Provisional / implemented direction
+**Status:** Obsolete; removed with Zellij in 0.2.0 (HN-076). The detached-launch primitive it produced survives as HN-069 and is used by the desk.
 
 Live testing showed:
 
@@ -814,7 +814,7 @@ Direct forms such as `hn pc claude` use that target for one interactive command 
 
 ## HN-059 — Managed Zellij persistence is optional
 
-**Status:** Accepted; supersedes HN-010 as a core dependency
+**Status:** Superseded by HN-076; the optional Zellij backend was removed in 0.2.0
 
 Zellij remains installed, available to users inside the transparent terminal, and implemented behind `SessionBackend` for explicit commands:
 
@@ -914,7 +914,7 @@ The reference Lenovo proved both wrappers resolve as functions over the real app
 The bootstrap is now two steps:
 
 - `prepareWorkerCore()` proves SSH, detects platform/architecture, and stops there. Every ordinary command uses it.
-- `ensurePersistenceRuntime()` installs the pinned persistence runtime. Only `-p`, `hn session`, `hn sessions`, `hn attach`, and the explicit `hn worker bootstrap` reach it.
+- the desk runtime installs on demand. Only `-p` and the explicit `hn worker bootstrap` reach it. (0.2.0 removed `ensurePersistenceRuntime()` along with Zellij; see HN-076.)
 
 `hn doctor` reports a missing runtime as `— persistence`, not `✗`. An optional capability that was never requested is not an unhealthy system.
 
@@ -977,3 +977,122 @@ That is now `src/windows-detach.js`, shared by both backends. Two failures were 
 
 - `Start-Process` alone is not enough. The server starts, answers while the SSH session is open, and is gone once it closes.
 - `Start-Process -RedirectStandardOutput` kills Herdr silently. It needs real console handles; redirecting its stdio to a file leaves a zero-byte log and no server. Herdr writes its own log under its session directory, so Handoff redirects nothing.
+
+---
+
+## HN-070 — The worker's Claude wears the controller's statusline, minus the Git it cannot see
+
+**Status:** Accepted; live-proven on the reference Lenovo
+
+A remote Claude that looks different from the local one reads as a lesser Claude, and that was the stated adoption blocker. Handoff ships `assets/claude-statusline.cjs` to `~/.hn/claude-statusline.cjs` and points its own settings file at it with `--settings`. The worker's `~/.claude/settings.json` is never written.
+
+The script reproduces the controller's `~/.claude/statusline.sh` exactly: segment order, labels, colours, separators, context percentage, the 5h and weekly countdowns with their `5h`/`7d` fallbacks, the reserved Fable segment, model shortening (`Opus 4.8 (1M context)` becomes `Opus4.8_1M`), and home-relative directory display.
+
+One segment is allowed to differ. `.git` stays on the controller, so the worker has no repository. Branch degrades to the dim `⎇ —` the local script already prints when it finds none. Dirty state degrades to a dim `—` rather than the local script's `clean`, because Handoff will not assert a Git state it cannot read. Nothing else is invented.
+
+A test feeds identical payloads to both renderers and asserts every segment before the last is byte-identical, and that the last is exactly this one difference.
+
+Rejected: a `hn` badge and a `local Git` label. Both were text invented to fill space the Git segments used to hold.
+
+---
+
+## HN-071 — Closing an attachment is not a failure
+
+**Status:** Accepted; live-proven
+
+`hn pc -p` ended with `hn: SSH command failed (255)` every time the user closed the desk. The desk was fine. 255 is ssh's own code for a connection that ended without a remote exit status, and closing a window produces exactly that.
+
+Suppressing 255 was rejected: a real network fault produces the same code.
+
+Instead, a non-zero attach asks the desk itself. `herdr --session <runtime> status server` is one cheap round trip. If the server answers `status: running`, the attachment ended and Handoff says so:
+
+```text
+desk still running on pc. 'hn pc -p' comes back to it
+```
+
+If it does not answer, that is a genuine failure and keeps a real error. Proven over four attach/detach cycles on the Lenovo: exit 0 each time, the same desk, the same two Claude processes, no duplicates.
+
+---
+
+## HN-072 — A cached fact about the worker is a hint, and the launch checks it
+
+**Status:** Accepted; live-proven
+
+Handoff caches `handoffStatuslineVersion`, `herdrVersion`, `claudeProfileProjection`, and `profileSyncPolicyFingerprint` per worker so a normal launch does no unconditional install work. A cache like that quietly becomes a wrong permanent assertion the moment someone deletes a file on the worker.
+
+So the launch verifies, and repairs once, instead of trusting the cache blindly:
+
+- `hn pc claude` runs one guard script before starting Claude. It reports a marker on stdout when either managed file or any projected profile link is missing. Handoff then re-ships the files, re-projects the links, and launches.
+- `hn pc -p` gets the same answer for free. The guard rides the desk probe that already had to run, which also reports whether the Herdr binary is still there.
+
+The signal is a stdout marker, never an exit code. Measured on Windows: `ssh -tt` returns 0 no matter what the remote program exits with, because OpenSSH drops the remote status once a pty is allocated. An earlier exit-code protocol was written, measured, and deleted for that reason.
+
+Measured cost on the reference Lenovo: `hn pc claude` median 2.45s without the guard, 2.79s with it. `hn pc -p` pays nothing.
+
+Live-proven by deleting each asset on the worker and launching: the statusline script, the settings file, a projected junction, and the Herdr binary. Each one was detected and put back.
+
+---
+
+## HN-073 — Install Herdr beside its locked files, not over them
+
+**Status:** Accepted; fixed after a live failure
+
+Restoring a deleted `herdr.exe` while a desk is running failed:
+
+```text
+Remove-Item : Cannot remove item ...\0.8.2\conpty\conpty.dll: Access to the path is denied.
+```
+
+`Expand-Archive -Force` deletes each entry before writing it, and the running server holds its ConPTY DLLs open.
+
+The install now unpacks to a staging directory under `%TEMP%` and copies into place with `-ErrorAction SilentlyContinue`. A locked file is already the correct file, so failing to overwrite it is not an error. The `herdr --version` check that follows is what decides whether the install worked.
+
+Proven on the Lenovo: the binary was restored under a running desk, and the desk kept its server process, its four projects, and both Claude agents.
+
+---
+
+## HN-074 — MCP health comes from Claude, or it is not claimed
+
+**Status:** Accepted
+
+`hn doctor` used to scan `~/.claude.json` and `~/.claude/settings.json` for `mcpServers` and check that each command existed on PATH. That is not Claude's effective MCP configuration, and printing `✓ mcp` from it was a claim Handoff had not earned.
+
+Doctor now runs `claude mcp list` on the worker and reports what it says:
+
+```text
+✓ mcp  claude mcp list: 2/2 connected
+✗ mcp  claude mcp list: 1/3 not connected: broken-one
+```
+
+Only server names and connection status are parsed. The command column is never read or printed: it can hold an API key in a URL or an env value. When Claude is absent, or the command fails or times out, doctor says that instead of guessing.
+
+---
+
+## HN-075 — Synchronized is not the same as usable, and doctor says which one it means
+
+**Status:** Accepted
+
+Codex reported thirteen `SKILL.md` files under gstack missing required YAML frontmatter. Those files are byte-identical on both machines. Handoff synchronized them correctly; they are invalid upstream.
+
+Handoff's diagnostics only claim what Handoff can know. The profile line reads `7 roots synchronized`. Whether a given skill, agent, or command file is valid is the agent runtime's own check, and Handoff does not edit third-party or personal skill content to make its own output green.
+
+---
+
+## HN-076 — Delete Zellij rather than ship a second persistence story
+
+**Status:** Accepted; supersedes HN-010, HN-011, HN-034, HN-035, and HN-059
+
+Herdr became the persistent desk in HN-067. That left two answers to the same question: `-p` on one side, and `hn session` / `hn new` / `hn attach` / `hn sessions` on the other. The second answer was never proven on native Windows, was already documented as scheduled for removal, and cost a pinned worker binary with five platform artifacts.
+
+Removed in 0.2.0:
+
+- `src/zellij.js` and `src/session.js`;
+- the `session`, `new`, `attach`, and `sessions` commands and their reserved names;
+- the Zellij worker bootstrap, its pinned version, and its five checksummed release assets;
+- `bootstrapWorker()`, `ensurePersistenceRuntime()`, and the `persistence` flag on `prepareTarget()`.
+
+`prepareWorkerCore()` is now the only worker preparation path. The desk runtime installs on first `-p` and nowhere else, so reaching a worker still pays for SSH and platform detection and nothing more.
+
+`SessionBackend` stays as a boundary. Replacing Herdr must not require touching target or workspace logic.
+
+Users who want a multiplexer can still run one themselves inside `hn pc`. Handoff does not install it, pin it, or claim it.

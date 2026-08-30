@@ -9,65 +9,13 @@ Severity terminology:
 - **Medium** — important production gap, workaround exists.
 - **Low** — polish/coverage gap.
 
-## 1. Optional managed native-Windows Zellij persistence is not proven
+## 1. Zellij persistence was never proven, and is gone
 
-**Severity:** Medium experimental feature gap; no longer a core-path blocker
+**Severity:** Closed in 0.2.0
 
-**Status:** Root cause isolated; transparent terminal proven independently
+Managed native-Windows Zellij persistence never passed its close-terminal/reattach proof. Live forensics found the cause: WMI detachment worked, but a Session 0 attached Zellij anchor received closed input, its `cmd.exe` pane exited, and the server printed `Bye from Zellij!` about 260 ms after startup, so the next connection found nothing.
 
-The daily native-Windows path is proven: `hn pc` enters the mapped PowerShell PTY, Node reports `win32 x64`, Claude and Codex open interactively, and remote dev servers work through `hn port`.
-
-Only the explicit `hn session` backend remains unproven.
-
-### Observed history
-
-Initial creation appeared to succeed, but immediate inspection failed:
-
-```text
-Zellij session '...' was created but could not be inspected
-There is no active session!
-```
-
-Improved diagnostics then showed:
-
-```text
-list-sessions: No active zellij sessions found.
-```
-
-A Windows process-lifetime workaround was introduced to detach session creation from the short-lived OpenSSH exec tree. Live forensics established that the broad process-lifetime hypothesis was wrong:
-
-- a WMI-created Session 0 sleeper executed and survived the originating SSH connection;
-- the exact Zellij anchor executed;
-- its non-interactive/closed input caused the initial `cmd.exe` pane to exit;
-- Zellij printed `Bye from Zellij!` and exited with code 0 about 260 ms after startup;
-- no server therefore remained for the next SSH connection to inspect.
-
-An earlier launcher transport also hit:
-
-```text
-The command line is too long.
-```
-
-The PowerShell transport was updated so oversized scripts can stream over SSH stdin instead of being placed in a giant `-EncodedCommand` argument.
-
-The remaining solution should use a supported headless layout or a tiny deterministic session host if Zellij still requires a durable console. It stays isolated behind `SessionBackend`; do not reintroduce it into `hn pc`.
-
-### Required proof
-
-After synchronization is healthy:
-
-```text
-1. hn session claude
-2. Claude opens on Windows
-3. close controller terminal
-4. open a new controller terminal
-5. run hn session claude from the same project
-6. same live Claude session reattaches
-```
-
-Only after this passes should native Windows persistence be marked solved.
-
-Session cleanup force-deletes the server, terminates an exact-match orphan only when it is Handoff's pinned Zellij binary, waits for asynchronous native-Windows shutdown, then removes the final resurrection record. Without that fallback and delay, a Session 0 server can rewrite the exited record after deletion. This prevents `hn sessions kill` from leaving an exited entry or hidden server process.
+Herdr replaced it as the `-p` persistent desk (HN-067). The legacy `hn session`, `hn new`, `hn attach`, and `hn sessions` commands and all Zellij code were removed in 0.2.0. See HN-076.
 
 ---
 
@@ -478,18 +426,34 @@ The next step is not to disable the gate; it is to improve ignores and problem-r
 
 ---
 
-## 18. The persistent desk has never had a human sitting in it
+## 18. The persistent desk still has no human hours in it
 
-Every mechanical step is proven on the reference Lenovo: install, detached server, two projects, no duplicates, a long-running process surviving closed SSH sessions, Claude detected with a state, and the TUI rendering over Handoff's PTY with mouse tracking on.
+Every mechanical step is proven on the reference Lenovo: install, detached server, four projects, no duplicates, long-running processes surviving closed SSH sessions, Claude detected with a state, and the TUI rendering over Handoff's PTY with mouse tracking on.
 
-What has not happened is a person using it. Nobody has clicked a project in the sidebar, answered a blocked agent, closed the Mac terminal for an hour, or come back with `hn pc -p`. Until that happens the feature is proven, not lived in.
+Measured on 2026-08-28 across repeated `hn pc -p` and `hn pc -p claude` runs with a forced disconnect between each:
+
+```text
+claude processes   33740, 29692   unchanged across 4 attach/detach cycles
+herdr server       37628          unchanged
+herdr clients      exactly 1 at any time, the previous one is evicted
+projects           4, same ids, same focus
+agents             2, same pane ids, one per project
+```
+
+`hn pc -p claude` focused the Claude already running in the project rather than starting a second one, every time.
+
+What has not happened is a person living in it: clicking through the sidebar for an afternoon, answering a blocked agent, closing the Mac for an hour and coming back. Until that happens the feature is proven, not lived in.
 
 Also open:
 
-- worker reboot is untested. Herdr restores projects, tabs, panes, and cwd; arbitrary processes do not come back, and agent conversation resume needs Herdr's optional integrations, which Handoff does not install;
+- **worker reboot is untested.** Nobody has rebooted the Lenovo and run `hn pc -p` afterwards. Herdr restores projects, tabs, panes, and cwd; arbitrary processes do not come back, and agent conversation resume needs Herdr's optional integrations, which Handoff does not install. Do not record this as solved;
 - terminal history across a server restart is deliberately left off. Saved screen contents can hold tokens and prompts;
-- `pane run` for `hn pc -p <command>` quotes arguments for the pane's shell but does not handle an executable path containing spaces;
-- `hn session`, `hn new`, and `hn attach` still use Zellij. They are the legacy surface and are scheduled for removal.
+- moving a running `herdr.exe` aside leaves the old file locked by the running server until the desk restarts. Testing on 2026-08-28 left one such file behind; it clears on the next desk restart.
+
+Closed by testing on 2026-08-28:
+
+- **executable paths with spaces.** `pane run` was documented as not handling them. It does. Proven with `C:\Users\Lenovo\AppData\Local\Temp\hn space test\my node.exe` plus arguments containing spaces, which returned `arg with spaces|second arg`. A separate limitation is real and belongs to Windows PowerShell 5.1, not Handoff: an argument containing double quotes is mangled when PowerShell passes it to a native executable;
+- **`hn: SSH command failed (255)` on every detach.** See HN-071. Closing an attachment now checks the desk and reports it as a detach.
 
 ---
 
@@ -498,3 +462,88 @@ Also open:
 The desk recognizes agents and their states by looking at what panes are printing on that machine. That is how `blocked`, `working`, `done`, and `idle` are known at all.
 
 That state stays on the worker. Handoff does not collect it, and nothing is uploaded anywhere. Anyone who does not want terminal inspection should not use `-p`; plain `hn pc` does none of it.
+
+---
+
+## 20. Handoff's managed files can be deleted on the worker, and are put back
+
+Handoff caches per worker that its managed Claude files and profile links are in place. That cache is a speed hint, not a fact about the worker, and it was possible for the worker to drift from it silently.
+
+The launch now verifies and repairs once. Live-tested on 2026-08-28 by deleting each asset on the Lenovo and launching:
+
+```text
+~/.hn/claude-statusline.cjs   deleted -> restored, sha256 matches the controller copy
+~/.hn/claude-settings.json    deleted -> restored, absolute path intact
+one projected junction        deleted -> re-projected, 73 back to 74
+~/.hn/bin/herdr/0.8.2/herdr.exe  removed -> reinstalled under a running desk
+```
+
+Both `hn pc claude` and `hn pc -p claude` recover. See HN-072 and HN-073.
+
+Not covered by this mechanism, on purpose: anything Mutagen owns. A missing synchronized file is a sync problem and `hn sync doctor` is the tool for it.
+
+---
+
+## 21. Skill file validity is not Handoff's claim
+
+Codex on the controller reported thirteen gstack `SKILL.md` files missing required YAML frontmatter. Those files synchronize correctly and are byte-identical on both machines. They are invalid upstream.
+
+Handoff reports `7 roots synchronized` and stops there. It does not edit third-party or personal skill content to make its own diagnostics green. See HN-075.
+
+---
+
+## 22. No NUL artifact from the managed Windows statusline
+
+An earlier Windows statusline command carried a `2>NUL` redirect. PowerShell does not treat `NUL` as a device, so that creates a file called `NUL` in whatever directory Claude was started from.
+
+The current command has no redirect at all:
+
+```text
+node "C:/Users/Lenovo/.hn/claude-statusline.cjs"
+```
+
+Verified on 2026-08-28 after many statusline refreshes. A recursive scan of `%USERPROFILE%`, `~/hn`, `~/.hn`, and `~/.claude` found zero files named `NUL`. A unit test asserts the generated settings script and command contain no `NUL` redirect.
+
+---
+
+## 23. A Herdr flag Handoff got wrong, and the check that now guards them
+
+`hn pc -p` failed on the Lenovo on 2026-08-30:
+
+```text
+hn: Herdr command failed (pane process-info wF:p1): unknown option: wF:p1
+```
+
+`herdr pane process-info` takes `--pane <ID>`. Every neighbouring command takes the id positionally (`pane run <PANE_ID>`, `agent focus <target>`, `workspace focus <workspace_id>`), so the call site matched its neighbours instead of the help text. The path is Windows-only and runs during desk bootstrap, so no controller test could reach it.
+
+All eleven other Herdr command lines were checked against the pinned 0.8.2 binary and are correct.
+
+`test/integration/herdr.integration.test.js` now downloads pinned Herdr on the controller and runs `--help` for every command Handoff builds, asserting the positional count and each flag. It runs in CI on ubuntu and macos. Reverting the fix fails it.
+
+---
+
+## 24. Three faults, one symptom: the desk's Claude had no statusline
+
+`hn pc -p` on the Lenovo opened Claude with no statusline and no `Alt+Backspace` at the shell prompt, while plain `hn pc` had both. Found on 2026-08-30. Three separate faults stacked up, and each one alone was enough to cause it.
+
+**The oversized PowerShell transport did nothing and said it worked.** A script too big for `-EncodedCommand`, even gzip-compressed, used to travel on ssh stdin to `powershell.exe -Command -`. On the reference worker PowerShell read it, ran nothing, printed nothing, and exited 0. Proven by bisection: the same three `Set-Content` statements ran fine one or two at a time (encoded transport) and vanished as a set of three (stdin transport):
+
+```text
+toml            len 877   encode code 0 "ok-toml"
+toml+cmd        len 1075  encode code 0 "ok-toml ok-cmd"
+toml+cmd+shell  len 4511  stdin  code 0 ""
+```
+
+`ensureHerdrConfig` is the only script Handoff builds that is that big, which is why nothing else showed it. Oversized scripts now go over scp and run from a file. Calling the file with `&` or `-File` is blocked by the worker's execution policy, and blocked with an error record that leaves the exit code at 0, so the runner reads the file and runs it as a scriptblock instead, then deletes it.
+
+**The desk never refreshed its own files.** `config.toml`, the pane shell shim `hn-powershell.cmd`, and `shell.ps1` ship with Handoff, not with the pinned Herdr binary. `runPersistentDesk` only reached `ensureHerdrConfig` through `ensureHerdrInstalled`, which is skipped when the binary is already there. Every worker that had ever run Herdr kept the older files. On the Lenovo, `~/.hn/shell.ps1` and `~/.hn/bin/hn-powershell.cmd` did not exist at all and `config.toml` had no `[terminal]` section.
+
+**The pane process probe read the wrong field.** `herdr pane process-info` answers with `result.process_info.foreground_processes`. The code read `result.foreground_processes`, always got an empty list, and treated that as "this pane is busy". `bootstrapIdleWindowsPane` therefore returned false for every pane that ever existed.
+
+Verified on the reference macOS controller and native Windows worker on 2026-08-30. After the fixes, a bootstrapped idle pane reports:
+
+```text
+Function|C:\Users\Lenovo\.hn\claude-settings.json|C:\Users\Lenovo\.agents\skills;C:\Users\Lenovo\.claude\skills
+```
+
+`claude` is Handoff's wrapper function rather than the bare executable, the managed settings path is set, and both skill directories are on `--add-dir`.

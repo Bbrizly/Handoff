@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { parseSshTarget, powerShellInvocation } from "../src/ssh.js";
 
 test("parseSshTarget parses user and host", () => {
@@ -28,13 +29,21 @@ test("parseSshTarget parses bracketed IPv6", () => {
 test("short PowerShell scripts stay in EncodedCommand argv", () => {
   const invocation = powerShellInvocation("Write-Output 'ok'");
   assert.ok(invocation.args.includes("-EncodedCommand"));
-  assert.equal(invocation.input, null);
+  assert.equal(invocation.file, undefined);
 });
 
-test("large PowerShell scripts stream over stdin instead of argv", () => {
+test("large compressible PowerShell scripts use a short encoded loader", () => {
   const invocation = powerShellInvocation(`Write-Output '${"x".repeat(7000)}'`);
-  assert.ok(!invocation.args.includes("-EncodedCommand"));
-  assert.deepEqual(invocation.args.slice(-2), ["-Command", "-"]);
-  assert.match(invocation.input, /Write-Output/);
-  assert.match(invocation.input, /SilentlyContinue/);
+  assert.ok(invocation.args.includes("-EncodedCommand"));
+  assert.equal(invocation.file, undefined);
+  assert.ok(invocation.args.at(-1).length <= 6000);
+});
+
+// This is what silently broke the persistent desk: an oversized script used to
+// travel on ssh stdin, where PowerShell read it, ran nothing, and exited 0.
+test("a script too big even compressed travels as a file, never on stdin", () => {
+  const noise = randomBytes(9000).toString("base64");
+  const invocation = powerShellInvocation(`Write-Output '${noise}'`);
+  assert.equal(invocation.args, undefined);
+  assert.match(invocation.file, /Write-Output/);
 });

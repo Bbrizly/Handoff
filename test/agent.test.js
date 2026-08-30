@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { additionalWorkspaceDirs, augmentAgentCommand } from "../src/agent.js";
+import { additionalWorkspaceDirs, augmentAgentCommand, isClaudeWorkCommand } from "../src/agent.js";
 
 const workspace = {
   roots: [
@@ -57,6 +57,37 @@ test("Claude management commands are not polluted with workspace flags", () => {
   assert.deepEqual(
     augmentAgentCommand(["claude", "auth", "status"], workspace, cwd),
     ["claude", "auth", "status"],
+  );
+});
+
+test("Claude work launches receive only Handoff's additive statusline settings", () => {
+  const workspace = { roots: [{ remote: "hn/main/GitHub", kind: "directory" }] };
+  const settings = '{"statusLine":{"type":"command","command":"node statusline.cjs"}}';
+  assert.deepEqual(
+    augmentAgentCommand(["claude"], workspace, "hn/main/GitHub/app", { claudeSettings: settings }),
+    ["claude", "--settings", settings, "--add-dir", ".."],
+  );
+  assert.equal(isClaudeWorkCommand(["claude"]), true);
+  assert.equal(isClaudeWorkCommand(["claude", "mcp", "list"]), false);
+  assert.equal(isClaudeWorkCommand(["codex"]), false);
+});
+
+test("Claude management commands and explicit settings remain untouched", () => {
+  const workspace = { roots: [] };
+  assert.deepEqual(
+    augmentAgentCommand(["claude", "mcp", "list"], workspace, "hn/main", { claudeSettings: "{}" }),
+    ["claude", "mcp", "list"],
+  );
+  assert.deepEqual(
+    augmentAgentCommand(["claude", "--settings", "user.json"], workspace, "hn/main", { claudeSettings: "{}" }),
+    ["claude", "--settings", "user.json"],
+  );
+});
+
+test("non-Claude commands are unaffected by statusline settings", () => {
+  assert.deepEqual(
+    augmentAgentCommand(["npm", "test"], { roots: [] }, "hn/main", { claudeSettings: "{}" }),
+    ["npm", "test"],
   );
 });
 

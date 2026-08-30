@@ -22,7 +22,7 @@ Browser                                          dev servers
       └────── Mutagen TCP forwarding ◄──────────────┘
 ```
 
-The core interactive path is a real SSH PTY into the mapped remote directory. Zellij is an optional layer behind `SessionBackend`, not a prerequisite for entering or using the worker.
+The core interactive path is a real SSH PTY into the mapped remote directory. The persistent desk is an optional layer behind `SessionBackend`, not a prerequisite for entering or using the worker.
 
 Handoff is deliberately a coordinator. It does not replace the editor, Git, network overlay, shell, sync engine, or session multiplexer.
 
@@ -63,7 +63,6 @@ A worker provides:
 
 - SSH access;
 - platform-native shell/command environment;
-- Handoff-managed Zellij binary;
 - project/workspace mirror under the remote user's home;
 - the actual workload tools the user wants to run.
 
@@ -411,7 +410,7 @@ The generated PowerShell bootstrap:
 - removes pending-pair state;
 - saves worker metadata.
 
-Pairing does not install the persistence runtime. That happens the first time the user runs `-p`, `hn session`, or the explicit `hn worker bootstrap`.
+Pairing does not install the persistence runtime. That happens the first time the user runs `-p`, or the explicit `hn worker bootstrap`.
 
 Current limitation: the bootstrap assumes the paired Windows account is an administrator.
 
@@ -434,7 +433,23 @@ On Windows, Handoff starts profile-aware PowerShell with `-NoExit` for the shell
 
 On POSIX, Handoff enters the user's login shell. Direct forms such as `hn pc claude` execute the command with the same PTY and mapped cwd but do not create a session.
 
-### 12.2 Why Zellij remains available
+### 12.1a The managed Claude experience on a worker
+
+When Handoff starts Claude it passes `--settings ~/.hn/claude-settings.json`. The worker's own `~/.claude/settings.json` is never written, so a worker the user also drives directly keeps its own configuration.
+
+Handoff owns exactly three things for this:
+
+```text
+~/.hn/claude-statusline.cjs    the statusline renderer
+~/.hn/claude-settings.json     points Claude's statusLine at it, absolute path, no redirect
+~/.claude/... junctions        the projected profile links
+```
+
+The renderer reproduces the controller's own statusline segment for segment. The two Git segments degrade, because `.git` stays on the controller. See HN-070.
+
+Freshness is cached per worker (`handoffStatuslineVersion`, `claudeProfileProjection`) so a normal launch does no install work. The cache is a hint, not an assertion about the worker: one guard script runs before the launch and reports on stdout when a managed file or a projected link is gone, and Handoff repairs once and continues. On Windows the signal must be stdout, because `ssh -tt` returns 0 whatever the remote program exits with. See HN-072.
+
+### 12.2 The persistent desk
 
 The persistent desk (`hn <target> -p`) runs on Herdr, pinned at v0.8.2 and Apache-2.0. Everything Handoff knows about Herdr lives in `src/herdr.js`; nothing outside that module builds a Herdr command line.
 
@@ -449,77 +464,13 @@ Herdr runs under a Handoff-owned config at `~/.hn/herdr/config.toml`, selected w
 
 Attaching does not use Herdr's own `--remote` client, which does not support Windows remote hosts. Handoff already owns SSH, so it runs a Herdr client on the worker through its own PTY.
 
-Zellij remains only behind the legacy `hn session` commands because it is cross-platform and has native Windows support. tmux and mandatory WSL remain rejected. Core Handoff does not depend on either backend.
+Ending an attachment is not a failure. A non-zero attach asks the desk directly (`herdr status server`); a running server means the user detached, and a silent one means a real fault. See HN-071.
+
+One probe covers the whole `-p` preflight: whether the desk is up, whether the Herdr binary is still installed, and whether Handoff's managed Claude files and profile links are still on the worker. It is the round trip the launch had to make anyway. Measured on the reference Lenovo: 265 to 305 ms for the probe, 910 to 930 ms for everything before the TUI appears.
+
+tmux, Zellij, and mandatory WSL remain rejected. Core Handoff does not depend on any session manager. See HN-076.
 
 The dependency is enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; the persistence runtime installs only when a persistent command asks for it. `hn doctor` reports a missing runtime as `— persistence`, not a failure.
-
-Pinned version:
-
-```text
-0.45.0
-```
-
-Handoff downloads official release artifacts, verifies pinned SHA256 hashes, and copies the binary to:
-
-```text
-Windows: $HOME\.hn\bin\zellij.exe
-POSIX:   $HOME/.hn/bin/zellij
-```
-
-### 12.3 Session identity
-
-A stable persistent command session is keyed from:
-
-```text
-workspace
-+ target
-+ project local path
-+ command arguments
-+ workspace-root mapping salt
-+ optional unique token
-```
-
-This gives:
-
-```bash
-hn session claude
-```
-
-one stable project/target session, while:
-
-```bash
-hn session new claude
-```
-
-creates another.
-
-### 12.4 Pane lifecycle
-
-The intended lifecycle is:
-
-1. inspect existing named Zellij session;
-2. if the expected command pane is healthy, reuse it;
-3. if stale/wrong, recreate the session;
-4. replace the initial shell pane with the desired command in the mapped cwd;
-5. attach interactively over SSH TTY.
-
-### 12.5 Native Windows persistence boundary
-
-Real native-Windows testing proved a narrow optional-backend issue. WMI successfully creates a detached Session 0 process that survives the originating SSH connection, but an attached Zellij anchor in that environment receives closed/non-interactive input. Its default `cmd.exe` pane exits, Zellij prints `Bye from Zellij!`, and the anchor exits cleanly roughly 260 ms after startup. A later connection therefore finds no active session.
-
-This disproved the earlier broad hypothesis that Windows OpenSSH simply kills every detached descendant. The remaining work is a supported headless Zellij layout/session-host strategy, isolated behind `SessionBackend`.
-
-This optional path is **not yet considered fully proven** until a real Windows test demonstrates:
-
-```text
-hn session claude
-→ Claude opens
-→ local terminal closes
-→ hn session claude
-→ same live session reattaches
-```
-
-See `KNOWN_ISSUES.md`.
 
 ## 13. Port forwarding architecture
 
@@ -582,12 +533,13 @@ hn worker default pc
 - official SHA256SUMS verified;
 - executable and agent bundle kept together.
 
-### Zellij
+### Herdr
 
-- version: 0.45.0;
+- version: 0.8.2;
 - worker-managed by Handoff;
-- official platform-specific binaries;
-- pinned SHA256 per artifact.
+- official GitHub release;
+- SHA-256 verified on the controller;
+- installed on first `-p`, never before.
 
 This reduces setup drift and makes Handoff's infrastructure behavior reproducible.
 
@@ -632,7 +584,7 @@ The following should be treated as hard invariants unless an explicit ADR supers
 5. Workspace synchronization is bidirectional and safe-by-default.
 6. Project context determines mapped command location and optional session identity but not a narrower implicit sync boundary.
 7. Native Windows is supported without WSL.
-8. The core mapped interactive terminal must not depend on Zellij or another session manager.
+8. The core mapped interactive terminal must not depend on a session manager.
 9. Handoff does not require its own hosted backend.
 10. Network overlay/provider concerns remain separable from core execution.
 11. Personal agent capability files reach trusted targets only, by explicit allowlist, and never carry credentials or caches.

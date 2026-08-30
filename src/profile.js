@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { copyToWorker, runPosix, runPowerShell } from "./ssh.js";
@@ -110,6 +111,13 @@ export function claudeProfileLinks(roots) {
   });
 }
 
+export function claudeProfileProjectionFingerprint(roots) {
+  return createHash("sha256")
+    .update(JSON.stringify(claudeProfileLinks(roots)))
+    .digest("hex")
+    .slice(0, 16);
+}
+
 export function ensureClaudeProfileProjection(worker, roots) {
   const links = claudeProfileLinks(roots);
   if (!links.length) return { created: 0, missing: 0, total: 0 };
@@ -168,7 +176,9 @@ Write-Output ("{0}|{1}|{2}" -f $created, $missing, @($links).Count)
   const statements = links.map((link) => {
     const destination = `"$HOME"/${quotePosix(link.link)}`;
     const target = `"$HOME"/${quotePosix(link.target)}`;
-    return `if [ ! -d ${target} ]; then missing=$((missing + 1)); elif [ ! -e ${destination} ] && [ ! -L ${destination} ]; then mkdir -p -- "$(dirname -- ${destination})"; ln -s -- ${target} ${destination}; created=$((created + 1)); fi`;
+    // A link pointing somewhere else is as broken as a missing one, so drop it
+    // first. The Windows branch already backs up whatever it finds in the way.
+    return `if [ ! -d ${target} ]; then missing=$((missing + 1)); else if [ -L ${destination} ] && [ "$(readlink ${destination})" != ${target} ]; then rm -f -- ${destination}; fi; if [ ! -e ${destination} ] && [ ! -L ${destination} ]; then mkdir -p -- "$(dirname -- ${destination})"; ln -s -- ${target} ${destination}; created=$((created + 1)); fi; fi`;
   });
   const result = runPosix(
     worker,

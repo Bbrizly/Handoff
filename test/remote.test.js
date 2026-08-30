@@ -29,13 +29,15 @@ test("interactive Windows shell stays open in the mapped remote directory", () =
   assert.match(script, /claude.*codex.*cursor/s);
   assert.match(script, /\.hn\\bin/);
   assert.match(script, /\$env:Path/);
+  assert.match(script, /Set-PSReadLineKeyHandler -Chord 'Alt\+Backspace' -Function BackwardKillWord/);
+  assert.match(script, /Get-Module -ListAvailable -Name PSReadLine/);
 });
 
 test("interactive Windows shell wraps agents with every auxiliary workspace directory", () => {
   const args = remote.interactivePowerShellArgs(
     "hn/main/GitHub/Handoff",
     [],
-    { agentDirs: ["../../Obsidian", "../../files"] },
+    { agentDirs: ["../../Obsidian", "../../files"], claudeSettings: "__HN_CLAUDE_SETTINGS__" },
   );
   const script = decodedPowerShell(args);
 
@@ -46,7 +48,22 @@ test("interactive Windows shell wraps agents with every auxiliary workspace dire
   assert.match(script, /\.\.\/\.\.\/Obsidian/);
   assert.match(script, /\.\.\/\.\.\/files/);
   assert.match(script, /--add-dir/);
+  assert.match(script, /hnClaudeSettings/);
+  assert.match(script, /--settings/);
+  assert.match(script, /claude-settings\.json/);
   assert.ok(args[args.indexOf("-EncodedCommand") + 1].length <= 6000);
+});
+
+test("Herdr's Windows pane shell reuses the scoped PSReadLine bootstrap", () => {
+  const command = remote.windowsPowerShellBootstrapCommand();
+  const script = remote.windowsShellBootstrapScript();
+  assert.match(command, /^@echo off/);
+  assert.match(command, /powershell\.exe -NoLogo -NoExit -File/);
+  assert.match(script, /Get-Module -ListAvailable -Name PSReadLine/);
+  assert.match(script, /Set-PSReadLineKeyHandler -Chord 'Alt\+Backspace' -Function BackwardKillWord/);
+  assert.match(script, /function global:claude/);
+  assert.match(script, /function global:codex/);
+  assert.doesNotMatch(script, /profile|Set-PSReadLineOption|HKCU|HKLM/i);
 });
 
 test("interactive Windows command runs directly with PTY-capable PowerShell", () => {
@@ -74,4 +91,26 @@ test("interactive POSIX shell and direct command preserve the mapped cwd", () =>
   assert.match(shell, /exec \"\$\{SHELL:-sh\}\" -l/);
   assert.match(command, /\.hn\/bin/);
   assert.match(command, /exec 'npm' 'run' 'dev'/);
+});
+
+// A remote program's exit code is its own. Only a dead connection earns a
+// Handoff message, so 255 gets a cheap probe before it is called a link failure.
+test("an ordinary remote failure never touches the connection", () => {
+  let probed = 0;
+  const probe = () => { probed += 1; return { code: 0 }; };
+  const worker = { target: "me@pc" };
+  assert.equal(remote.sshTransportFailed(worker, 0, probe), false);
+  assert.equal(remote.sshTransportFailed(worker, 1, probe), false);
+  assert.equal(remote.sshTransportFailed(worker, 130, probe), false);
+  assert.equal(probed, 0);
+});
+
+test("a remote program that exits 255 on a live link is not a transport failure", () => {
+  const probe = () => ({ code: 0, stdout: "hn-ok\n" });
+  assert.equal(remote.sshTransportFailed({ target: "me@pc" }, 255, probe), false);
+});
+
+test("255 on a dead link is reported as a transport failure", () => {
+  const probe = () => ({ code: 255, stdout: "", stderr: "connection refused" });
+  assert.equal(remote.sshTransportFailed({ target: "me@pc" }, 255, probe), true);
 });

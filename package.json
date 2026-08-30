@@ -1,8 +1,8 @@
 {
   "name": "hn",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "private": true,
-  "description": "Local-first mapped remote terminals and execution over SSH with Mutagen",
+  "description": "Local-first remote execution over SSH. Your files and Git stay local, your compute does not.",
   "type": "module",
   "bin": {
     "hn": "./src/index.js"

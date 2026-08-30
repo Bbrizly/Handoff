@@ -19,6 +19,11 @@ function executableName(command) {
   return String(command).split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
 }
 
+export function isClaudeWorkCommand(commandArgs = []) {
+  if (executableName(commandArgs[0]) !== "claude") return false;
+  return !CLAUDE_MANAGEMENT_COMMANDS.has(String(commandArgs[1] ?? "").toLowerCase());
+}
+
 function insertBeforeSeparator(args, additions) {
   const separator = args.indexOf("--");
   if (separator === -1) return [...args, ...additions];
@@ -37,12 +42,11 @@ export function additionalWorkspaceDirs(workspace, remoteCwd) {
   return dirs;
 }
 
-export function augmentAgentCommand(commandArgs, workspace, remoteCwd) {
+export function augmentAgentCommand(commandArgs, workspace, remoteCwd, options = {}) {
   if (!commandArgs.length) return commandArgs;
   const [command, ...rest] = commandArgs;
   const executable = executableName(command);
   const dirs = additionalWorkspaceDirs(workspace, remoteCwd);
-  if (!dirs.length) return [...commandArgs];
 
   if (executable === "claude") {
     if (CLAUDE_MANAGEMENT_COMMANDS.has(String(rest[0] ?? "").toLowerCase())) {
@@ -52,7 +56,11 @@ export function augmentAgentCommand(commandArgs, workspace, remoteCwd) {
     // Claude's --add-dir is variadic. It must come after positional prompts (or
     // immediately before an explicit -- separator), otherwise a startup prompt
     // can be consumed as another directory.
-    return [command, ...insertBeforeSeparator(rest, ["--add-dir", ...dirs])];
+    const settings = options.claudeSettings && !rest.includes("--settings")
+      ? ["--settings", options.claudeSettings]
+      : [];
+    const directories = dirs.length ? ["--add-dir", ...dirs] : [];
+    return [command, ...insertBeforeSeparator(rest, [...settings, ...directories])];
   }
 
   if (executable === "codex") {
