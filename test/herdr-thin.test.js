@@ -96,7 +96,7 @@ test("Windows bridge is connect-only and carries raw byte streams", () => {
   assert.ok(args.at(-1).length <= 6000);
 });
 
-test("local renderer gets a fully Handoff-owned config/state/cache namespace", () => {
+test("local renderer gets a fully Handoff-owned namespace and ignores ambient Herdr state", () => {
   const local = {
     configPath: "/hn/config/herdr/config.toml",
     configHome: "/hn/config",
@@ -106,6 +106,9 @@ test("local renderer gets a fully Handoff-owned config/state/cache namespace", (
   const env = localThinClientEnvironment(local, "/tmp/relay.sock", {
     HOME: "/Users/test",
     HERDR_SOCKET_PATH: "/tmp/wrong.sock",
+    HERDR_SESSION: "wrong-session",
+    HERDR_ENV: "1",
+    HERDR_REMOTE_BINARY: "/tmp/wrong-herdr",
   });
   assert.equal(env.HERDR_CONFIG_PATH, local.configPath);
   assert.equal(env.XDG_CONFIG_HOME, local.configHome);
@@ -115,6 +118,9 @@ test("local renderer gets a fully Handoff-owned config/state/cache namespace", (
   assert.equal(env.HERDR_REMOTE_KEYBINDINGS, "local");
   assert.equal(env.HERDR_RENDER_ENCODING, "terminal-ansi");
   assert.equal(env.HERDR_SOCKET_PATH, undefined);
+  assert.equal(env.HERDR_SESSION, undefined);
+  assert.equal(env.HERDR_ENV, undefined);
+  assert.equal(env.HERDR_REMOTE_BINARY, undefined);
 });
 
 test("streaming relay reuses Handoff SSH policy including control socket and custom port", () => {
