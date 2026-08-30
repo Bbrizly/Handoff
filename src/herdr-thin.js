@@ -1,51 +1,53 @@
-import { accessSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
-import { copyToWorker, runPowerShell } from "./ssh.js";
+import { basename, dirname, join, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+import { encodePowerShell, runPowerShell } from "./ssh.js";
 import { ensureCachedRelease, sha256File } from "./runtime-assets.js";
 import { remotePathExpression } from "./worker.js";
-import { quotePosix, quotePowerShell } from "./util.js";
+import { quotePowerShell } from "./util.js";
 
-export const THIN_HERDR_RELEASE = "2026.08.27.5";
-export const THIN_HERDR_UPSTREAM_VERSION = "0.8.2";
+export const THIN_HERDR_VERSION = "0.8.2";
 export const THIN_HERDR_PROTOCOL = 20;
 
-const RELEASE_TAG = `v${THIN_HERDR_RELEASE}`;
-const RELEASE_BASE = `https://github.com/hdosys/herdr-win/releases/download/${RELEASE_TAG}`;
-const REMOTE_WINDOWS_ZIP = {
-  file: `herdr-win_v${THIN_HERDR_RELEASE}_windows_amd64.zip`,
-  sha256: "77bed06f9e7d0ac57be99b5c8be3a5d153bd11cbb26781a8cf8c4d33207c8da1",
-};
-
+// These are the exact official Herdr v0.8.2 controller assets already pinned by
+// src/herdr.js. Tests deliberately compare the duplicated boundary so drift is
+// caught immediately. Thin mode does not use herdr-win or any other fork.
 const CLIENT_ASSETS = {
-  "darwin:arm64": {
-    file: `herdr-win_v${THIN_HERDR_RELEASE}_macos_arm64`,
-    sha256: "d39a3a6f0c00ef42392533c7ba547933e7480836556c10e054faf747a37733ca",
-  },
   "darwin:x64": {
-    file: `herdr-win_v${THIN_HERDR_RELEASE}_macos_amd64`,
-    sha256: "232e164fe2fffe021a2458107332aa35e78810db7e078a2aa3667c1d0727b64e",
+    file: "herdr-macos-x86_64",
+    sha256: "ab50262c8190cd7aa9056d249d255c08c328c3e8716de9cfa29db4f131b8e2c1",
+  },
+  "darwin:arm64": {
+    file: "herdr-macos-aarch64",
+    sha256: "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574",
   },
   "linux:x64": {
-    file: `herdr-win_v${THIN_HERDR_RELEASE}_linux_amd64`,
-    sha256: "daabf90ef6443c4e82cb2cfa2b34ed72d35cfa85692ca25af55be8d0cae5f8fb",
+    file: "herdr-linux-x86_64",
+    sha256: "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
   },
   "linux:arm64": {
-    file: `herdr-win_v${THIN_HERDR_RELEASE}_linux_arm64`,
-    sha256: "e6dd517b384a2c5ef2f82a73f82382b741ece225b3bdef4f9d0d2a8d1d7f80fa",
+    file: "herdr-linux-aarch64",
+    sha256: "f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d",
   },
 };
 
-const LOCAL_CONFIG = `# Written by Handoff. This config is only for the local Herdr thin client.
+const LOCAL_CONFIG = `# Written by Handoff. This config is only for the local Herdr renderer.
 onboarding = false
 
 [update]
 version_check = false
 manifest_check = false
-
-[remote]
-manage_ssh_config = true
 
 [ui]
 sidebar_width = 28
@@ -69,10 +71,17 @@ row_gap = 0
 rows = [["state_icon", "workspace"], ["agent", "state_text"]]
 `;
 
+const RELAY_SCRIPT = fileURLToPath(new URL("./herdr-relay.js", import.meta.url));
+const RELAY_START_TIMEOUT_MS = 5000;
+
 function normalizedArch(value) {
   if (["x64", "amd64", "x86_64"].includes(value)) return "x64";
   if (["arm64", "aarch64"].includes(value)) return "arm64";
   return value;
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 export function thinTransportMode(env = process.env) {
@@ -86,7 +95,9 @@ export function thinClientAsset(platform = process.platform, arch = process.arch
 }
 
 export function thinTransportSupported(worker, platform = process.platform, arch = process.arch) {
-  return Boolean(thinClientAsset(platform, arch)) && worker?.platform === "windows" && worker?.arch === "x64";
+  return Boolean(thinClientAsset(platform, arch))
+    && worker?.platform === "windows"
+    && worker?.arch === "x64";
 }
 
 export function thinWindowsSshShellCompatible(value) {
@@ -94,59 +105,59 @@ export function thinWindowsSshShellCompatible(value) {
   return ["cmd", "cmd.exe", "pwsh", "pwsh.exe"].includes(name);
 }
 
-export function thinServerCompatible(server) {
+export function thinServerCompatible(server, runtime = null) {
   return Boolean(
     server?.running
-    && String(server.version ?? "") === THIN_HERDR_UPSTREAM_VERSION
+    && server?.status === "running"
+    && String(server.version ?? "") === THIN_HERDR_VERSION
     && Number(server.protocol) === THIN_HERDR_PROTOCOL
-    && server?.capabilities?.detached_server_daemon === true,
+    && server?.capabilities?.detached_server_daemon === true
+    && (!runtime || String(server.session ?? "") === runtime),
   );
 }
 
-export function thinBridgeCompatible(bridge) {
-  const version = String(bridge?.version ?? "");
-  return bridge?.state === "ok"
-    && Number(bridge.protocol) === THIN_HERDR_PROTOCOL
-    && version.includes(THIN_HERDR_RELEASE)
-    && version.includes(THIN_HERDR_UPSTREAM_VERSION);
-}
-
-function releaseUrl(file) {
-  return `${RELEASE_BASE}/${file}`;
+function releaseUrl(asset) {
+  return `https://github.com/herdrdev/herdr/releases/download/v${THIN_HERDR_VERSION}/${asset.file}`;
 }
 
 function localInstallPath() {
-  return join(homedir(), ".hn", "bin", "herdr-thin", RELEASE_TAG, "herdr");
+  return join(homedir(), ".hn", "bin", "herdr-client", THIN_HERDR_VERSION, "herdr");
 }
 
-function localConfigPath() {
-  return join(homedir(), ".hn", "herdr", "thin-client.toml");
+function localClientRoot() {
+  return join(homedir(), ".hn", "herdr", "local-client");
 }
 
 function ensureLocalConfig() {
-  const path = localConfigPath();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  if (!existsSync(path) || readFileSync(path, "utf8") !== LOCAL_CONFIG) {
-    writeFileSync(path, LOCAL_CONFIG, { encoding: "utf8", mode: 0o600 });
+  const root = localClientRoot();
+  const configHome = join(root, "config");
+  const stateHome = join(root, "state");
+  const cacheHome = join(root, "cache");
+  const configPath = join(configHome, "herdr", "config.toml");
+  for (const path of [configHome, stateHome, cacheHome, dirname(configPath)]) {
+    mkdirSync(path, { recursive: true, mode: 0o700 });
   }
-  return path;
+  if (!existsSync(configPath) || readFileSync(configPath, "utf8") !== LOCAL_CONFIG) {
+    writeFileSync(configPath, LOCAL_CONFIG, { encoding: "utf8", mode: 0o600 });
+  }
+  return { configHome, stateHome, cacheHome, configPath };
 }
 
 export function ensureLocalThinClient(platform = process.platform, arch = process.arch) {
   const asset = thinClientAsset(platform, arch);
-  if (!asset) throw new Error(`local Herdr thin client is not pinned for ${platform}/${arch}`);
+  if (!asset) throw new Error(`official Herdr ${THIN_HERDR_VERSION} has no local thin-client build for ${platform}/${arch}`);
   const cached = ensureCachedRelease({
-    name: "herdr-thin",
-    version: THIN_HERDR_RELEASE,
+    name: "herdr",
+    version: THIN_HERDR_VERSION,
     file: asset.file,
-    url: releaseUrl(asset.file),
+    url: releaseUrl(asset),
     sha256: asset.sha256,
   });
   const target = localInstallPath();
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
   if (!existsSync(target) || sha256File(target) !== asset.sha256) copyFileSync(cached, target);
   chmodSync(target, 0o700);
-  return { binary: target, config: ensureLocalConfig() };
+  return { binary: target, ...ensureLocalConfig() };
 }
 
 function parseJson(output) {
@@ -164,12 +175,7 @@ try {
   $configuredShell = (Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell
   if (-not [string]::IsNullOrWhiteSpace([string]$configuredShell)) { $sshShell = [string]$configuredShell }
 } catch { }
-$pathHerdr = ''
-try {
-  $pathCommand = Get-Command herdr.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($pathCommand) { $pathHerdr = [string]$pathCommand.Source }
-} catch { }
-$serverExe = ${remotePathExpression(`.hn/bin/herdr/${THIN_HERDR_UPSTREAM_VERSION}/herdr.exe`)}
+$serverExe = ${remotePathExpression(`.hn/bin/herdr/${THIN_HERDR_VERSION}/herdr.exe`)}
 $server = $null
 if (Test-Path -LiteralPath $serverExe -PathType Leaf) {
   try {
@@ -178,31 +184,12 @@ if (Test-Path -LiteralPath $serverExe -PathType Leaf) {
     if ($serverRaw) { $server = $serverRaw | ConvertFrom-Json }
   } catch { $server = $null }
 }
-$bridgeRoot = Join-Path $HOME '.herdr\\remote'
-$bridgeExe = Join-Path $bridgeRoot 'herdr.exe'
-$bridge = @{ state = 'missing'; version = ''; protocol = 0 }
-if (Test-Path -LiteralPath $bridgeExe -PathType Leaf) {
-  try {
-    $env:HERDR_REMOTE_SIDECAR_V1 = '1'
-    Remove-Item Env:HERDR_ENV -ErrorAction SilentlyContinue
-    & $bridgeExe '--herdr-private-validate-remote-sidecar-v1' *> $null
-    if ($LASTEXITCODE -ne 0) { throw 'remote sidecar validation failed' }
-    $version = (& $bridgeExe --version 2>&1 | Out-String).Trim()
-    $clientRaw = (& $bridgeExe status client --json 2>$null | Out-String).Trim()
-    $client = if ($clientRaw) { $clientRaw | ConvertFrom-Json } else { $null }
-    $bridge = @{ state = 'ok'; version = $version; protocol = if ($client) { [int]$client.protocol } else { 0 } }
-  } catch {
-    $bridge = @{ state = 'broken'; version = ''; protocol = 0 }
-  } finally {
-    Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
-  }
-}
-@{ server = $server; bridge = $bridge; sshShell = $sshShell; pathHerdr = $pathHerdr } | ConvertTo-Json -Depth 8 -Compress
+@{ server = $server; sshShell = $sshShell } | ConvertTo-Json -Depth 8 -Compress
 `;
 }
 
 export function probeThinReadiness(worker, runtime) {
-  const fallback = { server: null, bridge: { state: "error", version: "", protocol: 0 }, sshShell: "", pathHerdr: "" };
+  const fallback = { server: null, sshShell: "" };
   const result = runPowerShell(worker, readinessScript(runtime), {
     capture: true,
     allowFailure: true,
@@ -212,91 +199,93 @@ export function probeThinReadiness(worker, runtime) {
   return parseJson(result.stdout) ?? fallback;
 }
 
-function installThinBridgeScript(remoteZip) {
-  return `$ErrorActionPreference = 'Stop'
-$archive = ${remotePathExpression(remoteZip)}
-$parent = Join-Path $HOME '.herdr'
-$target = Join-Path $parent 'remote'
-New-Item -ItemType Directory -Force -Path $parent | Out-Null
-if (Test-Path -LiteralPath $target) {
-  $items = @(Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue)
-  if ($items.Count -gt 0) { throw 'A different Herdr remote runtime already owns ~/.herdr/remote; Handoff will not overwrite it.' }
-  Remove-Item -LiteralPath $target -Recurse -Force
-}
-$stage = Join-Path $parent ('remote.hn-stage-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $stage | Out-Null
-try {
-  Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
-  $exe = Join-Path $stage 'herdr.exe'
-  if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Pinned herdr-win archive has no top-level herdr.exe.' }
-  [IO.File]::WriteAllBytes((Join-Path $stage '.lease'), [byte[]]@())
-  $env:HERDR_REMOTE_SIDECAR_V1 = '1'
-  Remove-Item Env:HERDR_ENV -ErrorAction SilentlyContinue
-  & $exe '--herdr-private-validate-remote-sidecar-v1' *> $null
-  if ($LASTEXITCODE -ne 0) { throw 'Pinned herdr-win archive failed its sidecar payload validation.' }
-  $version = (& $exe --version 2>&1 | Out-String).Trim()
-  $clientRaw = (& $exe status client --json 2>$null | Out-String).Trim()
-  $client = $clientRaw | ConvertFrom-Json
-  if ($version -notlike '*${THIN_HERDR_RELEASE}*' -or $version -notlike '*${THIN_HERDR_UPSTREAM_VERSION}*' -or [int]$client.protocol -ne ${THIN_HERDR_PROTOCOL}) {
-    throw 'Pinned herdr-win archive did not report the expected release/protocol.'
+export function thinClientSocketPath(server) {
+  const apiSocket = String(server?.socket ?? "").trim();
+  if (!apiSocket || win32.basename(apiSocket).toLowerCase() !== "herdr.sock") {
+    throw new Error(`Herdr returned an unexpected Windows server socket path '${apiSocket || "missing"}'`);
   }
-  Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
-  Move-Item -LiteralPath $stage -Destination $target
+  return win32.join(win32.dirname(apiSocket), "herdr-client.sock");
+}
+
+// Windows Herdr uses interprocess::GenericNamespaced for local sockets. On
+// Windows that is a named pipe whose logical name is the socket path string.
+// This bridge connects to that exact already-running pipe and copies bytes. It
+// contains deliberately no Herdr executable path and no start/restart logic.
+export function windowsClientBridgeScript(clientSocketPath) {
+  return `$ErrorActionPreference = 'Stop'
+$pipeName = ${quotePowerShell(clientSocketPath)}
+$pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+try {
+  $pipe.Connect(5000)
+  $stdin = [Console]::OpenStandardInput()
+  $stdout = [Console]::OpenStandardOutput()
+  $toPipe = $stdin.CopyToAsync($pipe)
+  $toStdout = $pipe.CopyToAsync($stdout)
+  $tasks = [Threading.Tasks.Task[]]@($toPipe, $toStdout)
+  $completed = [Threading.Tasks.Task]::WaitAny($tasks)
+  if ($tasks[$completed].IsFaulted) {
+    throw $tasks[$completed].Exception.GetBaseException()
+  }
+  try { $stdout.Flush() } catch { }
 } finally {
-  Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
-  if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
-  Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+  $pipe.Dispose()
 }
 `;
 }
 
-export function ensureThinRemoteBridge(worker, currentBridge = null) {
-  if (thinBridgeCompatible(currentBridge)) return currentBridge;
-  if (currentBridge?.state && currentBridge.state !== "missing") {
-    throw new Error("a different or broken Herdr remote runtime already exists at ~/.herdr/remote; refusing to replace it while work may be active");
-  }
-
-  const cached = ensureCachedRelease({
-    name: "herdr-thin",
-    version: THIN_HERDR_RELEASE,
-    file: REMOTE_WINDOWS_ZIP.file,
-    url: releaseUrl(REMOTE_WINDOWS_ZIP.file),
-    sha256: REMOTE_WINDOWS_ZIP.sha256,
-  });
-  const remoteZip = `.hn/cache/${REMOTE_WINDOWS_ZIP.file}`;
-  runPowerShell(worker, `New-Item -ItemType Directory -Force -Path ${remotePathExpression(".hn/cache")} | Out-Null\n`);
-  copyToWorker(worker, cached, remoteZip);
-  const installed = runPowerShell(worker, installThinBridgeScript(remoteZip), {
-    capture: true,
-    allowFailure: true,
-    timeoutMs: 60000,
-  });
-  if (installed.code !== 0) {
-    throw new Error((installed.stderr || installed.stdout || "thin bridge install failed").trim().slice(0, 500));
-  }
-  return null;
+export function windowsClientBridgeArgs(clientSocketPath) {
+  const encoded = encodePowerShell(windowsClientBridgeScript(clientSocketPath));
+  if (encoded.length > 6000) throw new Error("Handoff Herdr byte bridge exceeded the safe Windows OpenSSH argv budget");
+  return [
+    "powershell.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-EncodedCommand",
+    encoded,
+  ];
 }
 
-function resolveExecutable(name) {
-  for (const entry of String(process.env.PATH ?? "").split(":")) {
-    if (!entry) continue;
-    const candidate = join(entry, name);
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {}
-  }
-  return null;
+function relaySocketPath() {
+  return join(tmpdir(), `hn-herdr-${process.pid}-${randomBytes(6).toString("hex")}.sock`);
 }
 
-function sshShim(port) {
-  if (!port || port === 22) return null;
-  const ssh = resolveExecutable("ssh");
-  if (!ssh) throw new Error("ssh is not available on the controller");
-  const dir = mkdtempSync(join(tmpdir(), "hn-herdr-ssh-"));
-  const path = join(dir, "ssh");
-  writeFileSync(path, `#!/bin/sh\nexec ${quotePosix(ssh)} -p ${Number(port)} \"$@\"\n`, { mode: 0o700 });
-  return { dir, path };
+function startRelay(worker, remoteArgs) {
+  const socketPath = relaySocketPath();
+  const payload = Buffer.from(JSON.stringify({
+    worker,
+    socketPath,
+    remoteArgs,
+    parentPid: process.pid,
+  }), "utf8").toString("base64url");
+  const child = spawn(process.execPath, [RELAY_SCRIPT, payload], {
+    stdio: ["ignore", "ignore", "inherit"],
+    windowsHide: true,
+  });
+
+  const deadline = Date.now() + RELAY_START_TIMEOUT_MS;
+  while (!existsSync(socketPath) && Date.now() < deadline) sleepMs(10);
+  if (!existsSync(socketPath)) {
+    try { child.kill("SIGTERM"); } catch {}
+    return { ready: false, reason: "the local Handoff Herdr relay did not become ready", child, socketPath };
+  }
+  return { ready: true, child, socketPath };
+}
+
+export function localThinClientEnvironment(local, socketPath, base = process.env) {
+  const env = {
+    ...base,
+    HERDR_CONFIG_PATH: local.configPath,
+    HERDR_CLIENT_SOCKET_PATH: socketPath,
+    HERDR_RENDER_ENCODING: "terminal-ansi",
+    HERDR_REATTACH_COMMAND: "hn -p",
+    HERDR_REMOTE_KEYBINDINGS: "local",
+    XDG_CONFIG_HOME: local.configHome,
+    XDG_STATE_HOME: local.stateHome,
+    XDG_CACHE_HOME: local.cacheHome,
+  };
+  delete env.HERDR_SOCKET_PATH;
+  return env;
 }
 
 export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
@@ -306,24 +295,15 @@ export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
 
   const observed = readiness ?? probeThinReadiness(worker, runtime);
   if (!thinWindowsSshShellCompatible(observed.sshShell)) {
-    return { available: false, reason: `Windows OpenSSH DefaultShell '${observed.sshShell || "unknown"}' cannot stream the Herdr bridge; use cmd.exe or pwsh.exe` };
+    return { available: false, reason: `Windows OpenSSH DefaultShell '${observed.sshShell || "unknown"}' cannot safely carry the raw Herdr byte stream; use cmd.exe or pwsh.exe` };
   }
-  if (String(observed.pathHerdr ?? "").trim()) {
-    return { available: false, reason: `Windows PATH already resolves Herdr at '${observed.pathHerdr}'; refusing thin mode because herdr-win could select that user-owned binary instead of Handoff's sidecar` };
-  }
-  if (!thinServerCompatible(observed.server)) {
-    return { available: false, reason: "the running Handoff Herdr server is not a compatible detached v0.8.2/protocol-20 server" };
+  if (!thinServerCompatible(observed.server, runtime)) {
+    return { available: false, reason: `the existing Handoff Herdr server is not the expected detached ${THIN_HERDR_VERSION}/protocol-${THIN_HERDR_PROTOCOL} session` };
   }
 
-  try {
-    ensureThinRemoteBridge(worker, observed.bridge);
-  } catch (error) {
+  let clientSocket;
+  try { clientSocket = thinClientSocketPath(observed.server); } catch (error) {
     return { available: false, reason: error.message };
-  }
-
-  const verified = thinBridgeCompatible(observed.bridge) ? observed : probeThinReadiness(worker, runtime);
-  if (!thinBridgeCompatible(verified.bridge)) {
-    return { available: false, reason: "the pinned Windows Herdr bridge did not verify after installation" };
   }
 
   let local;
@@ -331,29 +311,28 @@ export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
     return { available: false, reason: error.message };
   }
 
-  let shim = null;
+  let relay = null;
   try {
-    shim = sshShim(worker.port);
-    const env = {
-      ...process.env,
-      HERDR_CONFIG_PATH: local.config,
-      HERDR_REMOTE_BINARY: ensureCachedRelease({
-        name: "herdr-thin",
-        version: THIN_HERDR_RELEASE,
-        file: REMOTE_WINDOWS_ZIP.file,
-        url: releaseUrl(REMOTE_WINDOWS_ZIP.file),
-        sha256: REMOTE_WINDOWS_ZIP.sha256,
-      }),
-    };
-    if (shim) env.PATH = `${shim.dir}:${env.PATH ?? ""}`;
-    const result = spawnSync(local.binary, [
-      "--remote", worker.target,
-      "--remote-keybindings", "local",
-      "--session", runtime,
-    ], { stdio: "inherit", env });
-    if (result.error) return { available: false, reason: `local Herdr client failed to start: ${result.error.message}` };
-    return { available: true, code: result.status ?? 1 };
+    relay = startRelay(worker, windowsClientBridgeArgs(clientSocket));
+    if (!relay.ready) return { available: false, reason: relay.reason };
+
+    const result = spawnSync(local.binary, ["client"], {
+      stdio: "inherit",
+      env: localThinClientEnvironment(local, relay.socketPath),
+    });
+    if (result.error) throw new Error(`local Herdr client failed to start: ${result.error.message}`);
+    const code = result.status ?? 1;
+    if (code !== 0) {
+      // Once the real local client has launched, never silently fall back to a
+      // second attachment transport. Official Herdr returns 0 for a deliberate
+      // remote detach and non-zero for handshake/connection/protocol failures.
+      throw new Error(`local Herdr client exited unexpectedly (${code}); the Windows desk was not restarted or modified`);
+    }
+    return { available: true, code: 0 };
   } finally {
-    if (shim) rmSync(shim.dir, { recursive: true, force: true });
+    if (relay) {
+      try { relay.child.kill("SIGTERM"); } catch {}
+      try { rmSync(relay.socketPath, { force: true }); } catch {}
+    }
   }
 }
