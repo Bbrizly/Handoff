@@ -451,12 +451,20 @@ function processName(value) {
   return String(value ?? "").split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
 }
 
+// Herdr nests this one reply a level deeper than the rest. Reading
+// result.foreground_processes gave an empty list every time, which read as
+// "this pane is busy", so no pane was ever bootstrapped.
+export function paneForegroundProcesses(reply) {
+  return reply?.result?.process_info?.foreground_processes ?? [];
+}
+
 // A pane can only be bootstrapped safely while its foreground process is the
 // shell itself. Never write into a live agent, build, server, or other tool.
 export function bootstrapIdleWindowsPane(worker, runtime, pane, { agentDirectories = [], claudeSettings = "" } = {}) {
   if (worker.platform !== "windows" || pane?.agent) return false;
-  const info = herdrJson(worker, runtime, ["pane", "process-info", "--pane", pane.pane_id])?.result;
-  const processes = info?.foreground_processes ?? [];
+  const processes = paneForegroundProcesses(
+    herdrJson(worker, runtime, ["pane", "process-info", "--pane", pane.pane_id]),
+  );
   if (!processes.length || processes.some((process) => !["powershell", "pwsh"].includes(processName(process.name)))) {
     return false;
   }

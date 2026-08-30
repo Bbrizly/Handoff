@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   HERDR_VERSION,
   herdrAssetFor,
@@ -7,6 +8,7 @@ import {
   herdrCommandScript,
   herdrConfigToml,
   herdrRuntimeName,
+  paneForegroundProcesses,
   parseHerdrJson,
   attachHerdr,
   paneCommandLine,
@@ -131,4 +133,27 @@ test("closing an attachment to a healthy desk is not a failure", () => {
     () => attachHerdr(worker, "hn-x", { attach: () => ({ code: 255 }), healthy: () => false }),
     /Lost the connection to the persistent desk/,
   );
+});
+
+// The bug this guards: the desk start called ensureHerdrConfig only through
+// ensureHerdrInstalled, which is skipped when the pinned binary is already
+// there. Workers that already ran Herdr never got shell.ps1 or the pane shell
+// shim, so the desk's Claude lost its statusline and Alt+Backspace.
+test("starting the desk refreshes Handoff's own Herdr files, not just the binary", () => {
+  const source = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+  const desk = source.slice(source.indexOf("function runPersistentDesk"), source.indexOf("function managedExpectationFor"));
+  assert.match(desk, /ensureHerdrConfig\(worker\);/);
+  assert.ok(
+    desk.indexOf("ensureHerdrConfig(worker);") < desk.indexOf("probeHerdrDesk("),
+    "the config has to be current before the desk server is probed or started",
+  );
+});
+
+// Captured from herdr 0.8.2 on the reference Windows worker.
+test("a pane's foreground processes come out of the nested process_info", () => {
+  const reply = parseHerdrJson('{"id":"cli:pane:process_info","result":{"process_info":'
+    + '{"foreground_process_group_id":29768,"foreground_processes":[{"name":"powershell.exe"}]}}}');
+  assert.deepEqual(paneForegroundProcesses(reply), [{ name: "powershell.exe" }]);
+  assert.deepEqual(paneForegroundProcesses({ result: { foreground_processes: [{ name: "x" }] } }), []);
+  assert.deepEqual(paneForegroundProcesses(null), []);
 });
