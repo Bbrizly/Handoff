@@ -47,7 +47,7 @@ const HERDR_ASSETS = {
   },
   "darwin:arm64": {
     file: "herdr-macos-aarch64",
-    sha256: "a5d4f4d504d8b0309c91f811050559300faba31258425f53c50852fc96f6ae574",
+    sha256: "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574",
     archive: "raw",
     binary: "herdr",
   },
@@ -527,8 +527,8 @@ export function attachHerdr(worker, runtime, backend = {}) {
     const thin = attachThinHerdr(worker, runtime);
     if (thin.available) {
       const result = { code: thin.code, stdout: "", stderr: "" };
-      if (result.code === 0) return { ...result, desk: "quit", transport: "thin" };
-      if (healthy(worker, runtime)) return { ...result, desk: "detached", transport: "thin" };
+      if (result.code === 0) return { ...result, desk: "quit" };
+      if (healthy(worker, runtime)) return { ...result, desk: "detached" };
       fail(
         `Lost the local thin-client connection to the persistent desk on ${worker.target} (exit ${result.code}).\n`
         + "Try: hn doctor",
@@ -550,8 +550,8 @@ export function attachHerdr(worker, runtime, backend = {}) {
     : runPosix(worker, script, { tty: true, allowFailure: true })));
 
   const result = attach();
-  if (result.code === 0) return { ...result, desk: "quit", transport: "legacy" };
-  if (healthy(worker, runtime)) return { ...result, desk: "detached", transport: "legacy" };
+  if (result.code === 0) return { ...result, desk: "quit" };
+  if (healthy(worker, runtime)) return { ...result, desk: "detached" };
   fail(
     `Lost the connection to the persistent desk on ${worker.target} (exit ${result.code}).\n`
     + "Try: hn doctor",
