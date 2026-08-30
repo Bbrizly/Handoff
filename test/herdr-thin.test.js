@@ -7,6 +7,8 @@ import { sshSpawnArgs } from "../src/ssh.js";
 import {
   THIN_HERDR_PROTOCOL,
   THIN_HERDR_VERSION,
+  THIN_WINDOWS_STDIN_BLOCKER,
+  attachThinHerdr,
   localThinClientEnvironment,
   thinClientAsset,
   thinClientSocketPath,
@@ -42,7 +44,7 @@ test("thin transport mode is safe and deterministic", () => {
 });
 
 test("thin transport only claims supported controller and worker pairs", () => {
-  assert.equal(thinTransportSupported({ platform: "windows", arch: "x64" }, "darwin", "arm64"), true);
+  assert.equal(thinTransportSupported({ platform: "windows", arch: "x64" }, "darwin", "arm64"), false);
   assert.equal(thinTransportSupported({ platform: "linux", arch: "x64" }, "darwin", "arm64"), false);
   assert.equal(thinTransportSupported({ platform: "windows", arch: "arm64" }, "darwin", "arm64"), false);
   assert.equal(thinTransportSupported({ platform: "windows", arch: "x64" }, "win32", "x64"), false);
@@ -187,4 +189,25 @@ test("Windows PowerShell bridge round-trips bytes through the real named-pipe AP
 
   assert.equal(code, 0, stderr);
   assert.equal(stdout.toString("utf8"), "pong");
+});
+
+// Real hardware, 2026-08-30, macOS controller -> native Windows worker.
+// Windows OpenSSH handed the bridge only the stdin buffered before the command
+// started and dropped every later write. The desk drew its first frame and then
+// ignored every keystroke, while changes made outside the client still rendered.
+// Never let a transport that cannot carry input present itself as available.
+test("a Windows worker cannot carry the thin byte bridge over shell stdio", () => {
+  const worker = { target: "user@host", platform: "windows", arch: "x64" };
+  const attached = attachThinHerdr(worker, "hn-12345678-main");
+  assert.equal(attached.available, false);
+  assert.equal(attached.reason, THIN_WINDOWS_STDIN_BLOCKER);
+  assert.match(attached.reason, /stdin/);
+});
+
+// The renderer only ever saw one frame per attach because a redirected console
+// stdout holds small writes. Copy loops must flush what they read.
+test("the Windows bridge flushes every frame it reads back to the client", () => {
+  const script = windowsClientBridgeScript("C:\\Users\\dev\\herdr-client.sock");
+  assert.match(script, /\$stdout\.Flush\(\)/);
+  assert.doesNotMatch(script, /\$pipe\.CopyToAsync\(\$stdout\)/);
 });

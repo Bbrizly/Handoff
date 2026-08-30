@@ -95,7 +95,22 @@ export function thinClientAsset(platform = process.platform, arch = process.arch
   return CLIENT_ASSETS[`${platform}:${normalizedArch(arch)}`] ?? null;
 }
 
+// Real hardware, 2026-08-30. Windows OpenSSH only keeps an exec channel's stdin
+// alive when it allocates a ConPTY. Without -tt it hands the command whatever
+// stdin was buffered before the process started and then silently drops the
+// rest, so the renderer's first frame arrived and every later keystroke went
+// nowhere: a desk that draws and cannot be typed into. -tt is not the answer
+// either, because a ConPTY echoes, rewrites CR/LF and injects its own escapes
+// into what has to stay a raw byte stream. Carrying the client socket needs a
+// transport that is not shell stdio, so keep thin off until one exists.
+export const THIN_WINDOWS_STDIN_BLOCKER =
+  "Windows OpenSSH drops an exec channel's stdin after startup, so the Herdr byte bridge cannot carry keystrokes";
+
+// Windows x64 was the only worker the bridge ever targeted, and the blocker
+// above rules it out, so nothing is supported today. The asset and arch checks
+// stay because they are what a future non-stdio transport still has to satisfy.
 export function thinTransportSupported(worker, platform = process.platform, arch = process.arch) {
+  if (worker?.platform === "windows") return false;
   return Boolean(thinClientAsset(platform, arch))
     && worker?.platform === "windows"
     && worker?.arch === "x64";
@@ -226,14 +241,19 @@ try {
   $pipe.Connect(5000)
   $stdin = [Console]::OpenStandardInput()
   $stdout = [Console]::OpenStandardOutput()
+  # Keystrokes into the pipe are unbuffered, so a copy task is fine going up.
   $toPipe = $stdin.CopyToAsync($pipe)
-  $toStdout = $pipe.CopyToAsync($stdout)
-  $tasks = [Threading.Tasks.Task[]]@($toPipe, $toStdout)
-  $completed = [Threading.Tasks.Task]::WaitAny($tasks)
-  if ($tasks[$completed].IsFaulted) {
-    throw $tasks[$completed].Exception.GetBaseException()
+  # Coming down it is not. A redirected console stdout keeps a small write
+  # buffer, so CopyToAsync held every frame after the first big one and the
+  # desk looked opened but dead. Flush each read instead.
+  $buffer = New-Object byte[] 65536
+  while ($true) {
+    $read = $pipe.Read($buffer, 0, $buffer.Length)
+    if ($read -le 0) { break }
+    $stdout.Write($buffer, 0, $read)
+    $stdout.Flush()
+    if ($toPipe.IsFaulted) { throw $toPipe.Exception.GetBaseException() }
   }
-  try { $stdout.Flush() } catch { }
 } finally {
   $pipe.Dispose()
 }
@@ -310,7 +330,10 @@ export function localThinClientEnvironment(local, socketPath, base = process.env
 
 export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
   if (!thinTransportSupported(worker)) {
-    return { available: false, reason: `thin client unsupported for ${process.platform}/${process.arch} -> ${worker?.platform}/${worker?.arch}` };
+    const reason = worker?.platform === "windows"
+      ? THIN_WINDOWS_STDIN_BLOCKER
+      : `thin client unsupported for ${process.platform}/${process.arch} -> ${worker?.platform}/${worker?.arch}`;
+    return { available: false, reason };
   }
 
   const observed = readiness ?? probeThinReadiness(worker, runtime);

@@ -547,3 +547,46 @@ Function|C:\Users\Lenovo\.hn\claude-settings.json|C:\Users\Lenovo\.agents\skills
 ```
 
 `claude` is Handoff's wrapper function rather than the bare executable, the managed settings path is set, and both skill directories are on `--add-dir`.
+
+## 25. The thin Herdr client renders but cannot be typed into
+
+The local-Herdr thin transport on `feat/local-herdr-thin-client` opens a real desk on the Mac, draws the whole sidebar and pane, and then ignores every key. Found on 2026-08-30 on the reference macOS controller and native Windows worker. The transport is off for Windows workers because of it.
+
+**Windows OpenSSH drops an exec channel's stdin once the command is running.** The bridge is `ssh worker powershell.exe -EncodedCommand <byte pump>` with no tty. The remote side gets whatever stdin was buffered before it started and nothing after. Proven with a bare echo command, one byte at a time:
+
+```text
+[+0ms]    sending IMMEDIATE-early (1B)
+[+369ms]  handle=System.IO.__ConsoleStream canread=True
+[+429ms]  GOT 1 at 17:12:43.982
+[+1502ms] sending t1.5s (1B)        <- never arrives
+[+3005ms] sending t3s (1B)          <- never arrives
+[+4506ms] sending t4.5s-big (1537B) <- never arrives
+```
+
+Three host processes, same worker:
+
+```text
+powershell.exe, no tty   early yes  late no
+cmd.exe /c findstr       early no   late no
+powershell.exe with -tt  early yes  late yes
+```
+
+Only a ConPTY session keeps stdin alive, which is why the legacy `ssh -tt` desk types fine. `-tt` cannot rescue the bridge: a ConPTY echoes, rewrites CR/LF and injects its own escapes into what has to stay a raw byte stream.
+
+**The symptom read as a dead connection but the link was healthy.** Relay byte counts show the handshake landing in the pre-start buffer, the server answering with a full frame, and then keystrokes going up forever with nothing coming back:
+
+```text
+576ms   UP 1537     client handshake
+996ms   DOWN 16139  full first frame
+8722ms  UP 13       these are real keys: the client log parses
+10760ms UP 9        Down and Ctrl+B correctly before sending them
+12799ms UP 7
+15292ms DOWN 5387   'herdr workspace focus' run over ssh, not typed
+19819ms DOWN 9802   'herdr workspace focus' run over ssh, not typed
+```
+
+Changes made outside the client still rendered instantly, so the downstream half and the named pipe are fine. `herdr client` against a local server on the same Mac answers keystrokes normally, so the client is fine too.
+
+**Two smaller faults were found and fixed on the way, neither of them the cause.** `thinServerCompatible` required `capabilities.detached_server_daemon`, which Herdr 0.8.2 reports false on every platform, so thin mode could never engage at all. And the bridge copied the pipe into a redirected console stdout with `CopyToAsync`, which holds small writes; it now flushes every read.
+
+Carrying the client socket needs a transport that is not shell stdio. Nothing here proves one works, so none is claimed.
