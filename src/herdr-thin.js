@@ -1,6 +1,6 @@
 import { accessSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { copyToWorker, runPowerShell } from "./ssh.js";
 import { ensureCachedRelease, sha256File } from "./runtime-assets.js";
@@ -46,6 +46,27 @@ manifest_check = false
 
 [remote]
 manage_ssh_config = true
+
+[ui]
+sidebar_width = 28
+sidebar_min_width = 20
+sidebar_max_width = 36
+mouse_capture = true
+copy_on_select = true
+confirm_close = true
+hide_tab_bar_when_single_tab = true
+show_agent_labels_on_pane_borders = true
+agent_panel_sort = "priority"
+status_indicators = "symbols"
+window_title = "hn: {workspace} on {hostname}"
+
+[ui.sidebar.spaces]
+row_gap = 0
+rows = [["state_icon", "workspace"]]
+
+[ui.sidebar.agents]
+row_gap = 0
+rows = [["state_icon", "workspace"], ["agent", "state_text"]]
 `;
 
 function normalizedArch(value) {
@@ -66,6 +87,11 @@ export function thinClientAsset(platform = process.platform, arch = process.arch
 
 export function thinTransportSupported(worker, platform = process.platform, arch = process.arch) {
   return Boolean(thinClientAsset(platform, arch)) && worker?.platform === "windows" && worker?.arch === "x64";
+}
+
+export function thinWindowsSshShellCompatible(value) {
+  const name = basename(String(value ?? "").trim().replaceAll("\\", "/")).toLowerCase();
+  return ["cmd", "cmd.exe", "pwsh", "pwsh.exe"].includes(name);
 }
 
 export function thinServerCompatible(server) {
@@ -133,6 +159,11 @@ function parseJson(output) {
 
 function readinessScript(runtime) {
   return `$ErrorActionPreference = 'Stop'
+$sshShell = 'cmd.exe'
+try {
+  $configuredShell = (Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell
+  if (-not [string]::IsNullOrWhiteSpace([string]$configuredShell)) { $sshShell = [string]$configuredShell }
+} catch { }
 $serverExe = ${remotePathExpression(`.hn/bin/herdr/${THIN_HERDR_UPSTREAM_VERSION}/herdr.exe`)}
 $server = $null
 if (Test-Path -LiteralPath $serverExe -PathType Leaf) {
@@ -161,18 +192,19 @@ if (Test-Path -LiteralPath $bridgeExe -PathType Leaf) {
     Remove-Item Env:HERDR_REMOTE_SIDECAR_V1 -ErrorAction SilentlyContinue
   }
 }
-@{ server = $server; bridge = $bridge } | ConvertTo-Json -Depth 8 -Compress
+@{ server = $server; bridge = $bridge; sshShell = $sshShell } | ConvertTo-Json -Depth 8 -Compress
 `;
 }
 
 export function probeThinReadiness(worker, runtime) {
+  const fallback = { server: null, bridge: { state: "error", version: "", protocol: 0 }, sshShell: "" };
   const result = runPowerShell(worker, readinessScript(runtime), {
     capture: true,
     allowFailure: true,
     timeoutMs: 15000,
   });
-  if (result.code !== 0) return { server: null, bridge: { state: "error", version: "", protocol: 0 } };
-  return parseJson(result.stdout) ?? { server: null, bridge: { state: "error", version: "", protocol: 0 } };
+  if (result.code !== 0) return fallback;
+  return parseJson(result.stdout) ?? fallback;
 }
 
 function installThinBridgeScript(remoteZip) {
@@ -268,6 +300,9 @@ export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
   }
 
   const observed = readiness ?? probeThinReadiness(worker, runtime);
+  if (!thinWindowsSshShellCompatible(observed.sshShell)) {
+    return { available: false, reason: `Windows OpenSSH DefaultShell '${observed.sshShell || "unknown"}' cannot stream the Herdr bridge; use cmd.exe or pwsh.exe` };
+  }
   if (!thinServerCompatible(observed.server)) {
     return { available: false, reason: "the running Handoff Herdr server is not a compatible detached v0.8.2/protocol-20 server" };
   }
