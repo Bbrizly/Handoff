@@ -66,11 +66,12 @@ test("remote commands carry Handoff's own Herdr config and session", () => {
 });
 
 test("the generated config turns off onboarding and update checks", () => {
-  const toml = herdrConfigToml();
+  const toml = herdrConfigToml("windows");
   assert.match(toml, /^onboarding = false$/m);
   assert.match(toml, /^version_check = false$/m);
   assert.match(toml, /^manifest_check = false$/m);
   assert.match(toml, /^status_indicators = "symbols"$/m);
+  assert.match(toml, /^default_shell = "~\/\.hn\/bin\/hn-powershell\.cmd"$/m);
   // The synced tree has no .git, so a branch row would always be blank.
   assert.match(toml, /^rows = \[\["state_icon", "workspace"\]\]$/m);
 });

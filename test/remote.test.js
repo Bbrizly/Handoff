@@ -29,6 +29,8 @@ test("interactive Windows shell stays open in the mapped remote directory", () =
   assert.match(script, /claude.*codex.*cursor/s);
   assert.match(script, /\.hn\\bin/);
   assert.match(script, /\$env:Path/);
+  assert.match(script, /Set-PSReadLineKeyHandler -Chord 'Alt\+Backspace' -Function BackwardKillWord/);
+  assert.match(script, /Get-Module -ListAvailable -Name PSReadLine/);
 });
 
 test("interactive Windows shell wraps agents with every auxiliary workspace directory", () => {
@@ -50,6 +52,18 @@ test("interactive Windows shell wraps agents with every auxiliary workspace dire
   assert.match(script, /--settings/);
   assert.match(script, /claude-settings\.json/);
   assert.ok(args[args.indexOf("-EncodedCommand") + 1].length <= 6000);
+});
+
+test("Herdr's Windows pane shell reuses the scoped PSReadLine bootstrap", () => {
+  const command = remote.windowsPowerShellBootstrapCommand();
+  const script = remote.windowsShellBootstrapScript();
+  assert.match(command, /^@echo off/);
+  assert.match(command, /powershell\.exe -NoLogo -NoExit -File/);
+  assert.match(script, /Get-Module -ListAvailable -Name PSReadLine/);
+  assert.match(script, /Set-PSReadLineKeyHandler -Chord 'Alt\+Backspace' -Function BackwardKillWord/);
+  assert.match(script, /function global:claude/);
+  assert.match(script, /function global:codex/);
+  assert.doesNotMatch(script, /profile|Set-PSReadLineOption|HKCU|HKLM/i);
 });
 
 test("interactive Windows command runs directly with PTY-capable PowerShell", () => {

@@ -30,7 +30,6 @@ import {
   workspaceRootsForTarget,
 } from "./workspace.js";
 import {
-  bootstrapWorker,
   detectWorker,
   doctorWorker,
   ensureRemoteDirectories,
@@ -54,6 +53,7 @@ import { findContext, mapLocalToRemote, normalizeLocalPath, tryFindContext } fro
 import {
   HERDR_VERSION,
   attachHerdr,
+  bootstrapHerdrProjectPane,
   ensureHerdrInstalled,
   ensureHerdrProject,
   ensureHerdrServer,
@@ -62,15 +62,6 @@ import {
   probeHerdrDesk,
   runInHerdrProject,
 } from "./herdr.js";
-import {
-  attachSession,
-  ensurePersistentCommand,
-  killSession,
-  listSessions,
-  newSessionToken,
-  sessionNameFor,
-  shellCommand,
-} from "./session.js";
 import { runInteractiveRemoteCommand, runRemoteCommand, sshTransportFailed } from "./remote.js";
 import {
   claudeProfileLinks,
@@ -92,8 +83,8 @@ import {
 } from "./statusline.js";
 
 const RESERVED_COMMANDS = new Set([
-  "help", "status", "doctor", "worker", "workspace", "sync", "sessions", "attach",
-  "port", "exec", "shell", "session", "new", "on", "use", "profile", "access",
+  "help", "status", "doctor", "worker", "workspace", "sync",
+  "port", "exec", "shell", "on", "use", "profile", "access",
 ]);
 const TARGET_HINTS = new Set(["home", "pc", "aws", "local"]);
 
@@ -144,9 +135,6 @@ Inspect/admin:
   hn sync [workspace]
   hn sync list
   hn sync stop [workspace]
-  hn sessions
-  hn sessions kill <session>
-  hn attach <session>
   hn port list
   hn port stop <forward>
 `);
@@ -226,13 +214,10 @@ function refreshProfileSyncPolicy(config, context, roots, records) {
   };
 }
 
-function prepareTarget(config, name, { quiet = true, persistence = false } = {}) {
+function prepareTarget(config, name, { quiet = true } = {}) {
   const worker = requireWorker(config, name);
   if (worker.pending) fail(`Target '${name}' is not paired yet. Run: hn worker finish ${name}`);
-  const prepared = persistence
-    ? bootstrapWorker(worker, { quiet })
-    : prepareWorkerCore(worker, { quiet });
-  return persistWorkerMetadata(config, name, prepared);
+  return persistWorkerMetadata(config, name, prepareWorkerCore(worker, { quiet }));
 }
 
 function currentContext(config, workspaceName = undefined) {
@@ -241,18 +226,17 @@ function currentContext(config, workspaceName = undefined) {
   return { ...context, targetName: target.name, worker: target.worker };
 }
 
-function workspaceSalt(workspace) {
-  return (workspace.roots ?? [])
-    .map((root) => `${root.local}->${root.remote}`)
-    .sort()
-    .join("\u0000");
-}
-
 function targetWorkspace(context) {
   return {
     ...context.workspace,
     roots: workspaceRootsForTarget(context.workspace, context.worker),
   };
+}
+
+function handoffAgentDirectories(workspace) {
+  return (workspace.roots ?? [])
+    .filter((root) => root.purpose !== "claude-profile")
+    .map(remoteRootDirectory);
 }
 
 function requireWorkspacePermission(context) {
@@ -577,27 +561,6 @@ function stopWorkspaceSync(config, workspaceName) {
   console.log(stopped ? `stopped ${stopped} sync session${stopped === 1 ? "" : "s"}` : "No active Handoff syncs for that workspace/target.");
 }
 
-function runPersistent(config, commandArgs, { unique = false, preparedWorker = null, targetName = null } = {}) {
-  let context = currentContext(config);
-  if (targetName) context = { ...context, targetName, worker: requireWorker(config, targetName) };
-  const worker = preparedWorker ?? prepareTarget(config, context.targetName, { persistence: true });
-  context = { ...context, worker };
-  ensureWorkspaceSync(config, context);
-
-  const remoteCwd = mapLocalToRemote(context.root, process.cwd());
-  const remoteArgs = augmentAgentCommand(commandArgs, targetWorkspace(context), remoteCwd);
-  const sessionName = sessionNameFor(
-    context.name,
-    context.targetName,
-    context.projectLocal,
-    commandArgs,
-    workspaceSalt(context.workspace),
-    unique ? newSessionToken() : "",
-  );
-  ensurePersistentCommand(worker, sessionName, remoteCwd, remoteArgs);
-  attachSession(worker, sessionName);
-}
-
 // Persistent mode: one desk per controller + workspace on the target, one
 // project per synchronized Git project. The runtime installs on first use.
 function runPersistentDesk(config, targetName, commandArgs = []) {
@@ -629,7 +592,14 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
     worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
     context = { ...context, worker };
   }
-  if (!probe.running) ensureHerdrServer(worker, runtime);
+  const workspace = targetWorkspace(context);
+  const agentDirectories = handoffAgentDirectories(workspace);
+  if (!probe.running) {
+    ensureHerdrServer(worker, runtime, {
+      agentDirectories,
+      claudeSettings: ".hn/claude-settings.json",
+    });
+  }
 
   // Project-scoped, not cwd-scoped. An existing desk keeps the directory it has.
   const remoteRoot = mapLocalToRemote(context.root, context.projectLocal);
@@ -640,6 +610,10 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
   if (project.created) {
     console.log(`desk ready. click a project or agent in the sidebar; 'hn ${targetName} -p' comes back here`);
   }
+  bootstrapHerdrProjectPane(worker, runtime, project.workspaceId, {
+    agentDirectories,
+    claudeSettings: ".hn/claude-settings.json",
+  });
   if (commandArgs.length) {
     const remoteArgs = augmentAgentCommand(
       commandArgs,
@@ -1002,29 +976,6 @@ async function main() {
     return;
   }
 
-  if (command === "sessions") {
-    const target = targetFor(config);
-    const worker = prepareTarget(config, target.name, { persistence: true });
-    if (args[0] === "kill") {
-      requireArgs(args.slice(1), 1, "hn sessions kill <session>");
-      killSession(worker, args[1]);
-      console.log(`killed ${args[1]}`);
-      return;
-    }
-    if (args.length && args[0] !== "list") fail("Usage: hn sessions [list|kill <session>]");
-    const result = listSessions(worker);
-    process.stdout.write(result.stdout || "No Handoff sessions.\n");
-    return;
-  }
-
-  if (command === "attach") {
-    requireArgs(args, 1, "hn attach <session>");
-    const target = targetFor(config);
-    const worker = prepareTarget(config, target.name, { persistence: true });
-    attachSession(worker, args[0]);
-    return;
-  }
-
   if (command === "port") {
     if (args[0] === "list") {
       printRecords(listForwards(), "No Handoff port forwards.");
@@ -1064,25 +1015,6 @@ async function main() {
   if (command === "shell") {
     const context = currentContext(config);
     runInteractive(config, context.targetName);
-    return;
-  }
-
-  if (command === "session") {
-    const unique = args[0] === "new";
-    const sessionArgs = unique ? args.slice(1) : args;
-    const context = currentContext(config);
-    const worker = prepareTarget(config, context.targetName, { persistence: true });
-    runPersistent(
-      config,
-      sessionArgs.length ? sessionArgs : shellCommand(worker),
-      { unique, preparedWorker: worker },
-    );
-    return;
-  }
-
-  if (command === "new") {
-    requireArgs(args, 1, "hn new <command...>");
-    runPersistent(config, args, { unique: true });
     return;
   }
 
