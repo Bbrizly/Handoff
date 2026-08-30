@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { copyToWorker, encodePowerShell, runPosix, runPowerShell, runSsh } from "./ssh.js";
 import { ensureCachedRelease, runLocal } from "./runtime-assets.js";
 import { remotePathExpression } from "./worker.js";
+import { windowsPowerShellBootstrapCommand, windowsShellBootstrapScript } from "./remote.js";
 import { windowsDetachedLaunchScript } from "./windows-detach.js";
 import { fail, quotePosix, quotePowerShell, shortHash, slug } from "./util.js";
 import { HANDOFF_CLAUDE_SETTINGS_TOKEN, MANAGED_REPAIR_MARKER } from "./statusline.js";
@@ -74,7 +75,13 @@ export function herdrRuntimeName(controllerId, workspaceName) {
 }
 
 // Handoff owns this file. The user's own ~/.config/herdr/config.toml is left alone.
-export function herdrConfigToml() {
+export function herdrConfigToml(platform = undefined) {
+  const terminal = platform === "windows"
+    ? `
+[terminal]
+default_shell = "~/.hn/bin/hn-powershell.cmd"
+`
+    : "";
   return `# Written by Handoff (hn). Your own Herdr config is untouched.
 onboarding = false
 
@@ -103,6 +110,7 @@ rows = [["state_icon", "workspace"]]
 [ui.sidebar.agents]
 row_gap = 0
 rows = [["state_icon", "workspace"], ["agent", "state_text"]]
+${terminal}
 `;
 }
 
@@ -187,12 +195,18 @@ function extractHerdr(asset, archivePath) {
 }
 
 export function ensureHerdrConfig(worker) {
-  const toml = herdrConfigToml();
+  const toml = herdrConfigToml(worker.platform);
   if (worker.platform === "windows") {
     runPowerShell(worker, `$ErrorActionPreference = 'Stop'
 $hnDir = ${remotePathExpression(".hn/herdr")}
 New-Item -ItemType Directory -Force -Path $hnDir | Out-Null
 Set-Content -LiteralPath ${remotePathExpression(CONFIG_RELATIVE)} -Value ${quotePowerShell(toml)} -Encoding utf8
+$hnBin = ${remotePathExpression(".hn/bin")}
+New-Item -ItemType Directory -Force -Path $hnBin | Out-Null
+$hnShell = ${remotePathExpression(".hn/bin/hn-powershell.cmd")}
+Set-Content -LiteralPath $hnShell -Value ${quotePowerShell(windowsPowerShellBootstrapCommand())} -Encoding ascii
+$hnBootstrap = ${remotePathExpression(".hn/shell.ps1")}
+Set-Content -LiteralPath $hnBootstrap -Value ${quotePowerShell(windowsShellBootstrapScript())} -Encoding utf8
 `);
     return;
   }
@@ -305,7 +319,7 @@ export function deskIsHealthy(worker, runtime) {
   return result.code === 0 && /status:\s*running/.test(result.stdout);
 }
 
-export function ensureHerdrServer(worker, runtime) {
+export function ensureHerdrServer(worker, runtime, { agentDirectories = [], claudeSettings = "" } = {}) {
   if (serverIsRunning(worker, runtime)) return;
 
   if (worker.platform === "windows") {
@@ -315,9 +329,15 @@ export function ensureHerdrServer(worker, runtime) {
     const child = `$ErrorActionPreference = 'Stop'
 ${windowsPrelude(worker, runtime)}& $hnHerdr --session $hnSession server
 `;
+    const absoluteDirectories = agentDirectories
+      .map((directory) => `(Join-Path $HOME ${quotePowerShell(directory.replaceAll("/", "\\"))})`)
+      .join(", ");
+    const environment = `$env:HN_HANDOFF_AGENT_DIRECTORIES = @(${absoluteDirectories}) -join [IO.Path]::PathSeparator
+$env:HN_HANDOFF_CLAUDE_SETTINGS = ${claudeSettings ? quotePowerShell(claudeSettings) : "''"}
+`;
     runPowerShell(
       worker,
-      windowsDetachedLaunchScript(child, { marker: "hn-desk" }),
+      windowsDetachedLaunchScript(environment + child, { marker: "hn-desk" }),
       { capture: true },
     );
   } else {
@@ -421,6 +441,36 @@ function projectPane(worker, runtime, workspaceId) {
   const panes = herdrJson(worker, runtime, ["pane", "list", "--workspace", workspaceId])
     ?.result?.panes ?? [];
   return panes.find((pane) => pane.focused) ?? panes[0] ?? null;
+}
+
+function processName(value) {
+  return String(value ?? "").split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
+}
+
+// A pane can only be bootstrapped safely while its foreground process is the
+// shell itself. Never write into a live agent, build, server, or other tool.
+export function bootstrapIdleWindowsPane(worker, runtime, pane, { agentDirectories = [], claudeSettings = "" } = {}) {
+  if (worker.platform !== "windows" || pane?.agent) return false;
+  const info = herdrJson(worker, runtime, ["pane", "process-info", "--pane", pane.pane_id])?.result;
+  const processes = info?.foreground_processes ?? [];
+  if (!processes.length || processes.some((process) => !["powershell", "pwsh"].includes(processName(process.name)))) {
+    return false;
+  }
+  const settings = claudeSettings ? quotePowerShell(claudeSettings) : "''";
+  const absoluteDirectories = agentDirectories
+    .map((directory) => `(Join-Path $HOME ${quotePowerShell(directory.replaceAll("/", "\\"))})`)
+    .join(", ");
+  const command = `$env:HN_HANDOFF_AGENT_DIRECTORIES = @(${absoluteDirectories}) -join [IO.Path]::PathSeparator; $env:HN_HANDOFF_CLAUDE_SETTINGS = ${settings}; . (Join-Path $HOME '.hn\\shell.ps1')`;
+  const result = runHerdr(worker, runtime, ["pane", "run", pane.pane_id, command], {
+    capture: true,
+    allowFailure: true,
+  });
+  return result.code === 0;
+}
+
+export function bootstrapHerdrProjectPane(worker, runtime, workspaceId, options = {}) {
+  const pane = projectPane(worker, runtime, workspaceId);
+  return pane ? bootstrapIdleWindowsPane(worker, runtime, pane, options) : false;
 }
 
 // 'hn pc -p claude' should return to the Claude already running in this project
