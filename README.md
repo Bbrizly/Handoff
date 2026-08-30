@@ -41,6 +41,7 @@ The canonical product and engineering specification lives in [`docs/`](./docs/RE
 - [`docs/CLI.md`](./docs/CLI.md): `hn` command and UX contract.
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md): real hardware findings and current blockers.
 - [`docs/ROADMAP.md`](./docs/ROADMAP.md): ordered path to v1 and later capabilities.
+- [`docs/THIN_HERDR_DOGFOOD.md`](./docs/THIN_HERDR_DOGFOOD.md): exact Mac -> Windows physical validation for the local-renderer persistent desk path.
 
 When changing the product architecture, update the decision ledger instead of relying on chat/history as the source of truth.
 

@@ -75,6 +75,14 @@ function baseArgs(worker, tty = false) {
   return args;
 }
 
+// Streaming transports (such as the local Herdr renderer) must reuse the exact
+// SSH policy as ordinary Handoff commands rather than growing a second SSH
+// implementation. The returned array ends with the target and is safe to append
+// a remote command to.
+export function sshSpawnArgs(worker, { tty = false } = {}) {
+  return baseArgs(worker, tty);
+}
+
 export function encodePowerShell(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }

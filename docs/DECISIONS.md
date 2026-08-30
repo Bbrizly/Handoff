@@ -1096,3 +1096,44 @@ Removed in 0.2.0:
 `SessionBackend` stays as a boundary. Replacing Herdr must not require touching target or workspace logic.
 
 Users who want a multiplexer can still run one themselves inside `hn pc`. Handoff does not install it, pin it, or claim it.
+
+---
+
+## HN-077 — Herdr protocol bytes ride an SSH forward, never an exec channel
+
+**Status:** Accepted
+
+The thin desk runs the official Herdr client on the Mac and needs its client socket
+to reach the worker's already-running Herdr server. The first build carried those
+bytes on `ssh worker powershell.exe`, pumping the exec channel's stdin and stdout
+into the Windows named pipe. It rendered and could not be typed into. Windows
+OpenSSH only keeps an exec channel's stdin alive when it allocates a ConPTY, so
+the remote pump got the handshake that was buffered before it started and nothing
+after. `-tt` is not a fix, because a ConPTY echoes, rewrites CR/LF and injects its
+own escapes into what has to stay a raw byte stream. KNOWN_ISSUES 25 has the
+timings.
+
+The bytes now take a different channel entirely. `ssh -L <private socket>:127.0.0.1:<port>`
+publishes the Unix socket the renderer wants and sshd forwards it over direct-tcpip.
+A helper on the worker holds the other end: it binds one loopback-only ephemeral
+port, takes exactly one connection, and copies bytes to the existing
+`herdr-client.sock` named pipe. No Handoff process sits in the data path.
+
+The helper is attachment-scoped, not a service. It knows no Herdr path and starts,
+stops, restarts and updates nothing. It exits when the connection closes, when the
+SSH channel dies, or after its accept window passes with nobody there. The forward
+dies with the client, so detaching leaves the worker exactly as it was.
+
+A loopback port is reachable by every account on the machine, which the named pipe
+is not. The helper closes that gap itself: it looks up the connecting process and
+refuses anything not running as the same Windows user, which is the pipe's own
+boundary restated.
+
+The attachment opens its own SSH connection rather than borrowing the shared
+`ControlMaster`. A shared master owns the forward's lifetime, and a stale one
+refuses new sessions outright, which is exactly what a long-lived desk must not
+depend on.
+
+Rejected: repairing exec stdin, a ConPTY for protocol bytes, a Node byte relay
+between the renderer and ssh (`ssh -L` already publishes the socket, so the relay
+was deleted), and any listener not bound to loopback.

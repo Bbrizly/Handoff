@@ -16,4 +16,6 @@ EnvHaven (`envhaven/envhaven`) was studied as an architectural reference for the
 
 The persistent desk pins Herdr v0.8.2. The Windows release is a bundle: `herdr.exe` plus Microsoft's ConPTY components, which carry their own notices inside the archive. Handoff installs the bundle whole rather than lifting the executable out of it.
 
+For local rendering of a Windows persistent desk, Handoff uses the same pinned official Herdr v0.8.2 client binary on the controller. Handoff itself owns the local Unix-socket relay and SSH byte transport to the already-running official Herdr server on Windows; no forked Herdr runtime is downloaded or executed.
+
 Herdr is used as a replaceable backend behind Handoff's persistence boundary. No Herdr source is copied into this repository.
