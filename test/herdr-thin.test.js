@@ -10,6 +10,7 @@ import {
   thinServerCompatible,
   thinTransportMode,
   thinTransportSupported,
+  thinWindowsSshShellCompatible,
 } from "../src/herdr-thin.js";
 
 test("thin Herdr runtime is pinned to the reviewed 0.8.2-compatible release", () => {
@@ -38,6 +39,15 @@ test("thin transport only claims supported controller and worker pairs", () => {
   assert.equal(thinTransportSupported({ platform: "linux", arch: "x64" }, "darwin", "arm64"), false);
   assert.equal(thinTransportSupported({ platform: "windows", arch: "arm64" }, "darwin", "arm64"), false);
   assert.equal(thinTransportSupported({ platform: "windows", arch: "x64" }, "win32", "x64"), false);
+});
+
+test("Windows thin attach accepts only streaming-safe OpenSSH shells", () => {
+  assert.equal(thinWindowsSshShellCompatible("cmd.exe"), true);
+  assert.equal(thinWindowsSshShellCompatible("C:\\Windows\\System32\\cmd.exe"), true);
+  assert.equal(thinWindowsSshShellCompatible("pwsh.exe"), true);
+  assert.equal(thinWindowsSshShellCompatible("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), true);
+  assert.equal(thinWindowsSshShellCompatible("powershell.exe"), false);
+  assert.equal(thinWindowsSshShellCompatible(""), false);
 });
 
 test("thin attach requires the existing Handoff server to be protocol-compatible and detached", () => {
