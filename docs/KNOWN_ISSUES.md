@@ -519,3 +519,31 @@ hn: Herdr command failed (pane process-info wF:p1): unknown option: wF:p1
 All eleven other Herdr command lines were checked against the pinned 0.8.2 binary and are correct.
 
 `test/integration/herdr.integration.test.js` now downloads pinned Herdr on the controller and runs `--help` for every command Handoff builds, asserting the positional count and each flag. It runs in CI on ubuntu and macos. Reverting the fix fails it.
+
+---
+
+## 24. Three faults, one symptom: the desk's Claude had no statusline
+
+`hn pc -p` on the Lenovo opened Claude with no statusline and no `Alt+Backspace` at the shell prompt, while plain `hn pc` had both. Found on 2026-08-30. Three separate faults stacked up, and each one alone was enough to cause it.
+
+**The oversized PowerShell transport did nothing and said it worked.** A script too big for `-EncodedCommand`, even gzip-compressed, used to travel on ssh stdin to `powershell.exe -Command -`. On the reference worker PowerShell read it, ran nothing, printed nothing, and exited 0. Proven by bisection: the same three `Set-Content` statements ran fine one or two at a time (encoded transport) and vanished as a set of three (stdin transport):
+
+```text
+toml            len 877   encode code 0 "ok-toml"
+toml+cmd        len 1075  encode code 0 "ok-toml ok-cmd"
+toml+cmd+shell  len 4511  stdin  code 0 ""
+```
+
+`ensureHerdrConfig` is the only script Handoff builds that is that big, which is why nothing else showed it. Oversized scripts now go over scp and run from a file. Calling the file with `&` or `-File` is blocked by the worker's execution policy, and blocked with an error record that leaves the exit code at 0, so the runner reads the file and runs it as a scriptblock instead, then deletes it.
+
+**The desk never refreshed its own files.** `config.toml`, the pane shell shim `hn-powershell.cmd`, and `shell.ps1` ship with Handoff, not with the pinned Herdr binary. `runPersistentDesk` only reached `ensureHerdrConfig` through `ensureHerdrInstalled`, which is skipped when the binary is already there. Every worker that had ever run Herdr kept the older files. On the Lenovo, `~/.hn/shell.ps1` and `~/.hn/bin/hn-powershell.cmd` did not exist at all and `config.toml` had no `[terminal]` section.
+
+**The pane process probe read the wrong field.** `herdr pane process-info` answers with `result.process_info.foreground_processes`. The code read `result.foreground_processes`, always got an empty list, and treated that as "this pane is busy". `bootstrapIdleWindowsPane` therefore returned false for every pane that ever existed.
+
+Verified on the reference macOS controller and native Windows worker on 2026-08-30. After the fixes, a bootstrapped idle pane reports:
+
+```text
+Function|C:\Users\Lenovo\.hn\claude-settings.json|C:\Users\Lenovo\.agents\skills;C:\Users\Lenovo\.claude\skills
+```
+
+`claude` is Handoff's wrapper function rather than the bare executable, the managed settings path is set, and both skill directories are on `--add-dir`.
