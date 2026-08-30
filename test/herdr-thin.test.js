@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { herdrAssetFor } from "../src/herdr.js";
 import {
   THIN_HERDR_PROTOCOL,
   THIN_HERDR_RELEASE,
@@ -18,6 +19,10 @@ test("thin Herdr runtime is pinned to the reviewed 0.8.2-compatible release", ()
   assert.equal(
     thinClientAsset("darwin", "arm64")?.sha256,
     "d39a3a6f0c00ef42392533c7ba547933e7480836556c10e054faf747a37733ca",
+  );
+  assert.equal(
+    herdrAssetFor("darwin", "arm64")?.sha256,
+    "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574",
   );
 });
 
