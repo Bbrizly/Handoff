@@ -5,6 +5,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -246,12 +247,17 @@ export function windowsClientBridgeArgs(clientSocketPath) {
   ];
 }
 
-function relaySocketPath() {
-  return join(tmpdir(), `hn-herdr-${process.pid}-${randomBytes(6).toString("hex")}.sock`);
+function relaySocketLocation() {
+  // tmpdir() is world-shared on some Unix systems. Put the socket inside a
+  // random private directory so there is no exposure window between listen()
+  // creating the socket and the relay chmodding it to 0600.
+  const dir = mkdtempSync(join(tmpdir(), "hn-herdr-"));
+  chmodSync(dir, 0o700);
+  return { dir, socketPath: join(dir, "relay.sock") };
 }
 
 function startRelay(worker, remoteArgs) {
-  const socketPath = relaySocketPath();
+  const { dir, socketPath } = relaySocketLocation();
   const payload = Buffer.from(JSON.stringify({
     worker,
     socketPath,
@@ -267,9 +273,10 @@ function startRelay(worker, remoteArgs) {
   while (!existsSync(socketPath) && Date.now() < deadline) sleepMs(10);
   if (!existsSync(socketPath)) {
     try { child.kill("SIGTERM"); } catch {}
-    return { ready: false, reason: "the local Handoff Herdr relay did not become ready", child, socketPath };
+    rmSync(dir, { recursive: true, force: true });
+    return { ready: false, reason: "the local Handoff Herdr relay did not become ready", child, socketPath, dir };
   }
-  return { ready: true, child, socketPath };
+  return { ready: true, child, socketPath, dir };
 }
 
 export function localThinClientEnvironment(local, socketPath, base = process.env) {
@@ -339,7 +346,7 @@ export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
   } finally {
     if (relay) {
       try { relay.child.kill("SIGTERM"); } catch {}
-      try { rmSync(relay.socketPath, { force: true }); } catch {}
+      try { rmSync(relay.dir, { recursive: true, force: true }); } catch {}
     }
   }
 }
