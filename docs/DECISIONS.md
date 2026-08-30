@@ -134,7 +134,7 @@ Rejected workaround: solve Windows session persistence by routing all Windows us
 
 ## HN-010 — Zellij is the persistent-session backend
 
-**Status:** Superseded as a core dependency by HN-059; retained as an optional backend
+**Status:** Superseded by HN-076; Zellij was removed in 0.2.0
 
 Zellij was selected over tmux because:
 
@@ -151,7 +151,7 @@ Rejected: tmux as the universal backend.
 
 ## HN-011 — Persistent sessions are keyed by project + target + command context
 
-**Status:** Accepted for explicit persistent sessions; not a requirement of the transparent terminal
+**Status:** Superseded by HN-068 and HN-076; the desk keys a project by label first, token second for explicit persistent sessions; not a requirement of the transparent terminal
 
 A normal persistent command should reconnect to the same logical session.
 
@@ -171,15 +171,15 @@ Identity includes:
 
 **Status:** Accepted for explicit persistent sessions; not a requirement of the transparent terminal
 
-This remains the contract for `hn session`, but it no longer gates the core `hn pc` transparent terminal. A direct SSH PTY naturally ends when its controller terminal disconnects.
+This remains the contract for the persistent desk (`-p`), but it no longer gates the core `hn pc` transparent terminal. A direct SSH PTY naturally ends when its controller terminal disconnects.
 
 Success test:
 
 ```text
-hn session claude
+hn pc -p claude
 → close local terminal
 → open another terminal
-→ hn session claude
+→ hn pc -p claude
 → same remote Claude session returns
 ```
 
@@ -498,7 +498,7 @@ Accepted fix direction: stream oversized scripts over SSH stdin instead of expan
 
 ## HN-034 — Pin one stable Zellij socket/runtime directory on Windows
 
-**Status:** Provisional / implemented
+**Status:** Obsolete; removed with Zellij in 0.2.0 (HN-076)
 
 Windows Zellij invocations use a stable Handoff-owned runtime path under `~/.hn` so create/inspect/control/attach calls made through separate SSH invocations can discover the same session.
 
@@ -508,7 +508,7 @@ This is part of the current native-Windows persistence work and remains subject 
 
 ## HN-035 — Native Windows Zellij creation may need to escape the OpenSSH process lifetime
 
-**Status:** Provisional / implemented direction
+**Status:** Obsolete; removed with Zellij in 0.2.0 (HN-076). The detached-launch primitive it produced survives as HN-069 and is used by the desk.
 
 Live testing showed:
 
@@ -814,7 +814,7 @@ Direct forms such as `hn pc claude` use that target for one interactive command 
 
 ## HN-059 — Managed Zellij persistence is optional
 
-**Status:** Accepted; supersedes HN-010 as a core dependency
+**Status:** Superseded by HN-076; the optional Zellij backend was removed in 0.2.0
 
 Zellij remains installed, available to users inside the transparent terminal, and implemented behind `SessionBackend` for explicit commands:
 
@@ -914,7 +914,7 @@ The reference Lenovo proved both wrappers resolve as functions over the real app
 The bootstrap is now two steps:
 
 - `prepareWorkerCore()` proves SSH, detects platform/architecture, and stops there. Every ordinary command uses it.
-- `ensurePersistenceRuntime()` installs the pinned persistence runtime. Only `-p`, `hn session`, `hn sessions`, `hn attach`, and the explicit `hn worker bootstrap` reach it.
+- the desk runtime installs on demand. Only `-p` and the explicit `hn worker bootstrap` reach it. (0.2.0 removed `ensurePersistenceRuntime()` along with Zellij; see HN-076.)
 
 `hn doctor` reports a missing runtime as `— persistence`, not `✗`. An optional capability that was never requested is not an unhealthy system.
 
@@ -1075,3 +1075,24 @@ Only server names and connection status are parsed. The command column is never 
 Codex reported thirteen `SKILL.md` files under gstack missing required YAML frontmatter. Those files are byte-identical on both machines. Handoff synchronized them correctly; they are invalid upstream.
 
 Handoff's diagnostics only claim what Handoff can know. The profile line reads `7 roots synchronized`. Whether a given skill, agent, or command file is valid is the agent runtime's own check, and Handoff does not edit third-party or personal skill content to make its own output green.
+
+---
+
+## HN-076 — Delete Zellij rather than ship a second persistence story
+
+**Status:** Accepted; supersedes HN-010, HN-011, HN-034, HN-035, and HN-059
+
+Herdr became the persistent desk in HN-067. That left two answers to the same question: `-p` on one side, and `hn session` / `hn new` / `hn attach` / `hn sessions` on the other. The second answer was never proven on native Windows, was already documented as scheduled for removal, and cost a pinned worker binary with five platform artifacts.
+
+Removed in 0.2.0:
+
+- `src/zellij.js` and `src/session.js`;
+- the `session`, `new`, `attach`, and `sessions` commands and their reserved names;
+- the Zellij worker bootstrap, its pinned version, and its five checksummed release assets;
+- `bootstrapWorker()`, `ensurePersistenceRuntime()`, and the `persistence` flag on `prepareTarget()`.
+
+`prepareWorkerCore()` is now the only worker preparation path. The desk runtime installs on first `-p` and nowhere else, so reaching a worker still pays for SSH and platform detection and nothing more.
+
+`SessionBackend` stays as a boundary. Replacing Herdr must not require touching target or workspace logic.
+
+Users who want a multiplexer can still run one themselves inside `hn pc`. Handoff does not install it, pin it, or claim it.

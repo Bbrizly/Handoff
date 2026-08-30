@@ -82,7 +82,7 @@ can show actual problem paths or direct the user to a first-class command that d
 
 **Status:** Complete on reference hardware
 
-The core no longer depends on Zellij. The mapped interactive PTY is proven with native PowerShell, Node, Claude, Codex, npm, Vite, and port forwarding.
+The core depends on no session manager. The mapped interactive PTY is proven with native PowerShell, Node, Claude, Codex, npm, Vite, and port forwarding.
 
 ### Smoke test
 
@@ -97,20 +97,6 @@ Acceptance:
 2. Node reports `win32 x64`.
 3. Plain `claude` and `codex` open interactively.
 4. Direct forms such as `hn pc claude` work without managed sessions.
-
-### Optional managed persistence follow-up
-
-`hn session` remains experimental. The root cause is now isolated to Zellij's Session 0 closed-input lifecycle, not generic WMI/OpenSSH descendant teardown. Continue with supported headless layouts or a minimal session host; keep it behind `SessionBackend`.
-
-- Zellij creation log;
-- `list-sessions`;
-- process ownership/lifetime;
-- stable socket directory;
-- OpenSSH job/process behavior.
-
-Do not switch the architecture to WSL/tmux as an unexamined workaround.
-
----
 
 ## Phase 3 — Prove round-trip editing
 
@@ -197,7 +183,7 @@ hn port 5173
 
 Acceptance:
 
-- server runs directly in the remote PTY (users may opt into Zellij themselves);
+- server runs directly in the remote PTY (users may opt into a multiplexer themselves);
 - controller browser reaches localhost;
 - forwarding resumes/reuses deterministic Mutagen forwarding session;
 - user does not manually run SSH tunnel commands.
@@ -242,7 +228,7 @@ Responsibilities may include:
 - account/auth launch flows without taking ownership of credentials;
 - disk/GPU/runtime diagnostics where relevant.
 
-Keep Handoff-managed infrastructure (SSH/Zellij) separate from user workload/toolchain ownership.
+Keep Handoff-managed infrastructure (SSH/Mutagen/Herdr) separate from user workload/toolchain ownership.
 
 ---
 
@@ -337,7 +323,7 @@ Remaining:
 - a human in the loop: click through the sidebar, close the terminal for an hour, come back;
 - **reboot recovery is untested.** Nobody has rebooted the worker and run `hn pc -p`. Do not record this as solved until someone does;
 - `hn attention` for the agents that are waiting;
-- retire `hn new`, `hn attach`, `hn session`, and raw session names, then delete Zellij.
+- done in 0.2.0: retired `hn new`, `hn attach`, `hn session`, `hn sessions`, and deleted Zellij.
 
 Terminal history must not persist across a worker restart by default. Saved screen contents can hold tokens and prompts.
 

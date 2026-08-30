@@ -68,7 +68,6 @@ macOS laptop
 Worker
 native Windows laptop
 - OpenSSH Server
-- Zellij
 - Claude / Codex
 - Node / build tools
 - optional GPU workloads
@@ -105,7 +104,7 @@ Handoff coordinates proven primitives instead of rebuilding them:
 - SSH for reachability and command transport;
 - Mutagen for synchronized workspaces and forwarding;
 - the worker's native shell for the daily interactive experience;
-- Zellij as an optional persistence layer;
+- Herdr as the optional persistence layer;
 - Git remains Git;
 - Tailscale/LAN/VPN/cloud networking remains outside Handoff.
 
@@ -201,7 +200,7 @@ cd Handoff
 npm link
 ```
 
-Handoff should minimize prerequisite installation. Today it self-manages pinned Mutagen and Zellij components where implemented.
+Handoff should minimize prerequisite installation. Today it self-manages a pinned Mutagen and, only when persistence is asked for, a pinned Herdr.
 
 ### 7.2 Pair a native Windows worker
 
@@ -290,7 +289,7 @@ Direct interactive execution is allowed:
 hn aws claude
 ```
 
-This connects to `aws`, enters the mapped directory, and runs Claude directly with the SSH PTY. It does not implicitly create a Zellij session or change the selected target.
+This connects to `aws`, enters the mapped directory, and runs Claude directly with the SSH PTY. It does not implicitly start a persistent desk or change the selected target.
 
 ### 7.6 Transparent remote terminal
 
@@ -310,7 +309,7 @@ Expected behavior:
 5. map local working directory to remote path;
 6. allocate a real interactive SSH PTY;
 7. enter native PowerShell on Windows or the user's login shell on POSIX;
-8. let the user run Claude, Codex, npm, Docker, Zellij, or any other worker tool normally.
+8. let the user run Claude, Codex, npm, Docker, or any other worker tool normally.
 
 ### 7.7 Optional managed persistence
 
@@ -321,13 +320,7 @@ hn pc -p claude
 
 `-p` opens the persistent desk. It runs on Herdr, installs on first use, and is not required for the transparent terminal or direct command paths. Closing an attachment leaves the desk and its processes running; `hn pc -p` returns to them.
 
-```bash
-hn session
-hn session claude
-hn session new claude
-```
-
-These are the older Zellij surface. They are legacy, scheduled for removal, and are not the persistence Handoff offers today. Users may also run a multiplexer themselves inside `hn pc`.
+`hn session`, `hn new`, `hn attach`, and `hn sessions` were the older Zellij surface. They were removed in 0.2.0; `-p` is the persistence Handoff offers. Users may still run a multiplexer themselves inside `hn pc`.
 
 ### 7.7a Claude's appearance on a worker
 
@@ -463,9 +456,9 @@ Personal profile roots are deliberately excluded from `--add-dir`. They belong a
 
 ### FR-10: Interactive terminal and optional persistent sessions
 
-The core terminal must be a real interactive SSH PTY in the mapped remote directory and must not depend on Zellij.
+The core terminal must be a real interactive SSH PTY in the mapped remote directory and must not depend on a session manager.
 
-Zellij remains the selected optional session backend behind `SessionBackend`. Managed persistence should survive terminal disconnects when invoked explicitly with `hn session`, but failure of that optional backend must not block `hn pc`, direct interactive commands, or `hn exec`.
+Herdr is the selected optional session backend behind `SessionBackend`. Managed persistence should survive terminal disconnects when invoked explicitly with `-p`, but failure of that optional backend must not block `hn pc`, direct interactive commands, or `hn exec`.
 
 Session identity must be stable for the same:
 
@@ -474,8 +467,6 @@ Session identity must be stable for the same:
 - project;
 - command arguments;
 - workspace root mapping set.
-
-`hn session new ...` adds a unique token.
 
 Exited/stale sessions should be repaired rather than endlessly reattached.
 
@@ -491,7 +482,7 @@ Handoff should own infrastructure dependencies required by Handoff itself.
 
 Current examples:
 
-- pinned checksum-verified Zellij on workers;
+- pinned checksum-verified Herdr on workers, installed on first `-p`;
 - pinned checksum-verified Mutagen on the controller;
 - Windows OpenSSH onboarding.
 
@@ -502,7 +493,6 @@ Development tools such as Claude, Codex, Node, Python, CUDA, Docker, and model r
 `hn doctor` must show whether the active worker has:
 
 - SSH;
-- Zellij;
 - Claude;
 - Codex;
 - Node;
@@ -594,11 +584,10 @@ At the time this document was created, the code already implements:
 - live Mutagen monitor output during single-session flushes;
 - duplicate Mutagen session repair;
 - manual Mutagen forwarding;
-- pinned Zellij 0.45.0 worker bootstrap;
 - stable persistent session naming;
 - transparent mapped SSH PTY handoff through target aliases;
-- direct interactive commands without implicit Zellij;
-- explicit optional persistence through `hn session`;
+- direct interactive commands without implicit persistence;
+- explicit optional persistence through `-p`;
 - Claude/Codex multi-root augmentation;
 - Windows application-shim preference;
 - oversized PowerShell transport fallback to SSH stdin;
@@ -609,7 +598,7 @@ At the time this document was created, the code already implements:
 
 The transparent core path is physically proven on native Windows: `hn pc` entered `C:\Users\Lenovo\hn\main\GitHub\Handoff`, Node returned `win32 x64`, Claude and Codex opened interactively, a Vite dev server ran remotely, and `hn port` exposed it through Mac localhost.
 
-The `-p` persistent desk is proven on the same machine: project switching, agent reuse without duplicates, survival across repeated disconnects, and recovery when a managed file or the Herdr binary is deleted. Worker reboot recovery is not tested. Optional managed native-Windows Zellij creation was never proven and is legacy.
+The `-p` persistent desk is proven on the same machine: project switching, agent reuse without duplicates, survival across repeated disconnects, and recovery when a managed file or the Herdr binary is deleted. Worker reboot recovery is not tested. The legacy Zellij surface was never proven on native Windows and was removed in 0.2.0.
 
 ## 12. Proven real-world synchronization lessons
 
@@ -662,7 +651,7 @@ And all of the following are true:
 4. Claude edits appear back on the controller quickly;
 5. local edits appear on the worker quickly;
 6. `.git` exists only on the controller;
-7. Claude, Codex, npm, Docker, Python, and Zellij can be invoked normally inside that shell;
+7. Claude, Codex, npm, Docker, and Python can be invoked normally inside that shell;
 8. direct forms such as `hn pc claude` run interactively without implicit session management;
 9. changing worker does not require changing projects or editor configuration;
 10. a remote dev server is reachable with `hn port`;

@@ -19,7 +19,6 @@ hn codex
 hn shell
 hn npm run dev
 hn pc claude
-hn session claude
 hn exec npm test
 
 hn port 5173
@@ -28,8 +27,6 @@ hn port 3000 3001
 hn pc -p
 hn -p
 
-hn sessions
-hn attach <session>
 hn doctor
 
 hn access
@@ -96,7 +93,7 @@ Direct interactive target command:
 hn aws claude
 ```
 
-This enters the mapped cwd and runs Claude directly with the PTY. It does not change the selected target or create a managed Zellij session.
+This enters the mapped cwd and runs Claude directly with the PTY. It does not change the selected target or start a persistent desk.
 
 Target aliases are arbitrary configured names. `pc`, `home`, and `aws` are ergonomic examples/hints, not special backend types.
 
@@ -164,19 +161,7 @@ resolve local context
 → run command directly
 ```
 
-The command lifetime is the SSH connection lifetime unless the user starts Zellij or another persistence tool explicitly.
-
-## 5. `hn session`
-
-```bash
-hn session
-hn session claude
-hn session new claude
-```
-
-This is the optional managed persistence layer behind `SessionBackend`. `new` adds a unique token to create an independent session.
-
-Native-Windows managed Zellij persistence remains experimental and must not block the core target terminal.
+The command lifetime is the SSH connection lifetime unless the user asks for persistence with `-p`.
 
 ## 6. `hn shell`
 
@@ -298,7 +283,7 @@ Expected output:
 hn worker finish pc
 ```
 
-Verifies SSH, detects platform/architecture, bootstraps Zellij, stores metadata.
+Verifies SSH, detects platform/architecture, installs the persistent desk runtime, stores metadata.
 
 ### Add an already reachable worker
 
@@ -418,22 +403,6 @@ not shared  /Users/me/Desktop/scratch.txt
 
 Sharing rules the user cannot inspect are not trustworthy, so this command exists to make ignore policy and trust scope visible.
 
-## 14. Sessions
-
-List:
-
-```bash
-hn sessions
-```
-
-Attach explicitly:
-
-```bash
-hn attach main-pc-handoff-claude-...
-```
-
-Stable session names should remain deterministic enough for Handoff to reconnect, but users should not be required to manually construct them.
-
 ## 15. Doctor
 
 ```bash
@@ -523,7 +492,7 @@ Naming of `--local`/`--remote` is preferred over Mutagen's `alpha`/`beta` user-f
 2. **Progress for slow work.** Never look hung when data is moving.
 3. **Quiet when healthy.** Do not dump full Mutagen session metadata before every command once the sync is idle.
 4. **Exact path on file problems.** Counts alone are insufficient.
-5. **Underlying error preserved.** Include useful stderr/stdout from SSH/Mutagen/Zellij.
+5. **Underlying error preserved.** Include useful stderr/stdout from SSH/Mutagen/Herdr.
 6. **No infrastructure jargon unless needed.** Prefer `local`/`remote`, workspace/target/project over `alpha`/`beta`.
 7. **Safe action hints.** Error messages should provide the next command when Handoff can identify it.
 
@@ -538,13 +507,9 @@ doctor
 worker
 workspace
 sync
-sessions
-attach
 port
 exec
 shell
-session
-new
 use
 profile
 access
@@ -560,7 +525,7 @@ A target alias cannot use a reserved command name.
 - target selection without connecting is explicit through `hn use` or `hn worker default`.
 - ordinary commands run directly and interactively; persistence is explicit.
 - `hn exec` remains explicitly one-shot.
-- `hn session` is the optional managed persistence surface.
+- `-p` is the optional managed persistence surface.
 - `-p`, `--p`, and `--persist` are the same flag, and Handoff reads them only before the remote command begins.
 - ordinary commands never install a persistence runtime.
 - `hn sync` means the whole configured workspace, not only the current project.
