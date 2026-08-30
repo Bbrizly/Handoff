@@ -284,7 +284,14 @@ export function localThinClientEnvironment(local, socketPath, base = process.env
     XDG_STATE_HOME: local.stateHome,
     XDG_CACHE_HOME: local.cacheHome,
   };
+  // `--session` / HERDR_SESSION outranks HERDR_CLIENT_SOCKET_PATH in upstream
+  // Herdr. Never let an ambient Herdr shell/session redirect Handoff's renderer
+  // away from the private relay socket. HERDR_ENV would also trigger nested-Herdr
+  // rejection before client mode can connect.
   delete env.HERDR_SOCKET_PATH;
+  delete env.HERDR_SESSION;
+  delete env.HERDR_ENV;
+  delete env.HERDR_REMOTE_BINARY;
   return env;
 }
 
