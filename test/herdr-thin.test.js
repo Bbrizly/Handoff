@@ -7,7 +7,6 @@ import { sshSpawnArgs } from "../src/ssh.js";
 import {
   THIN_HERDR_PROTOCOL,
   THIN_HERDR_VERSION,
-  THIN_WINDOWS_STDIN_BLOCKER,
   attachThinHerdr,
   localThinClientEnvironment,
   thinClientAsset,
@@ -16,8 +15,10 @@ import {
   thinTransportMode,
   thinTransportSupported,
   thinWindowsSshShellCompatible,
-  windowsClientBridgeArgs,
-  windowsClientBridgeScript,
+  forwardFailureReason,
+  thinForwardArgs,
+  windowsPipeBridgeArgs,
+  windowsPipeBridgeScript,
 } from "../src/herdr-thin.js";
 
 test("thin Herdr uses the exact official v0.8.2 assets Handoff already pins", () => {
@@ -44,7 +45,7 @@ test("thin transport mode is safe and deterministic", () => {
 });
 
 test("thin transport only claims supported controller and worker pairs", () => {
-  assert.equal(thinTransportSupported({ platform: "windows", arch: "x64" }, "darwin", "arm64"), false);
+  assert.equal(thinTransportSupported({ platform: "windows", arch: "x64" }, "darwin", "arm64"), true);
   assert.equal(thinTransportSupported({ platform: "linux", arch: "x64" }, "darwin", "arm64"), false);
   assert.equal(thinTransportSupported({ platform: "windows", arch: "arm64" }, "darwin", "arm64"), false);
   assert.equal(thinTransportSupported({ platform: "windows", arch: "x64" }, "win32", "x64"), false);
@@ -109,16 +110,63 @@ test("thin bridge derives only the client socket beside the proven API socket", 
   assert.throws(() => thinClientSocketPath({ socket: "C:\\tmp\\other.sock" }), /unexpected Windows server socket/);
 });
 
-test("Windows bridge is connect-only and carries raw byte streams", () => {
-  const script = windowsClientBridgeScript("C:\\Users\\dev\\herdr-client.sock");
+test("the worker helper is connect-only, loopback-only and holds no lifecycle authority", () => {
+  const pipe = "C:\\Users\\dev\\AppData\\Roaming\\herdr\\sessions\\hn-main\\herdr-client.sock";
+  const script = windowsPipeBridgeScript(pipe, 41234);
   assert.match(script, /NamedPipeClientStream/);
-  assert.match(script, /OpenStandardInput/);
-  assert.match(script, /OpenStandardOutput/);
-  assert.match(script, /CopyToAsync/);
-  assert.doesNotMatch(script, /herdr\.exe|Get-Command|server\s+start|server\s+stop|restart|provision/i);
-  const args = windowsClientBridgeArgs("C:\\Users\\dev\\herdr-client.sock");
+  assert.ok(script.includes(pipe), "the helper must target the exact already-running pipe");
+  assert.match(script, /IPAddress\.Loopback/);
+  assert.doesNotMatch(script, /IPAddress\.Any|0\.0\.0\.0|IPAddress\.IPv6Any/);
+  assert.doesNotMatch(script, /Firewall/i);
+  assert.doesNotMatch(script, /herdr\.exe|Get-Command|server\s+start|server\s+stop|restart|provision|update/i);
+  assert.doesNotMatch(script, /\.herdr|config\.toml|profile\.ps1/i);
+  // Protocol bytes ride the forwarded channel. The exec channel must stay out of
+  // the data path, because Windows OpenSSH stops delivering its stdin.
+  assert.doesNotMatch(script, /OpenStandardInput|OpenStandardOutput/);
+});
+
+test("the worker helper takes one attachment, checks its peer, and lets go", () => {
+  const script = windowsPipeBridgeScript("C:\\hn\\herdr-client.sock", 41234);
+  assert.match(script, /listener\.Stop\(\)/);
+  assert.match(script, /acceptMs/);
+  assert.match(script, /HN-NOCLIENT/);
+  assert.match(script, /HN-PORTBUSY/);
+  // A loopback port is open to every local account; the named pipe is not.
+  assert.match(script, /WindowsIdentity\.GetCurrent\(\)\.User\.Value/);
+  assert.match(script, /HN-DENIED/);
+});
+
+test("the helper runner fits a Windows OpenSSH argv and cleans its own script up", () => {
+  const args = windowsPipeBridgeArgs(".hn-herdr-bridge-deadbeef.ps1");
   assert.equal(args.at(-2), "-EncodedCommand");
   assert.ok(args.at(-1).length <= 6000);
+  const runner = Buffer.from(args.at(-1), "base64").toString("utf16le");
+  assert.match(runner, /Remove-Item/);
+  assert.doesNotMatch(runner, /powershell\.exe\s+-File|&\s*\$hnScript/);
+});
+
+test("Herdr bytes travel on a forwarded socket, never on the exec channel", () => {
+  const args = thinForwardArgs({ target: "dev@example", port: 2222 }, "/tmp/private/relay.sock", 41234, ["powershell.exe", "-EncodedCommand", "x"]);
+  assert.ok(args.includes("-L"));
+  assert.equal(args[args.indexOf("-L") + 1], "/tmp/private/relay.sock:127.0.0.1:41234");
+  assert.ok(args.includes("ExitOnForwardFailure=yes"));
+  assert.ok(!args.includes("-tt"), "a ConPTY would rewrite the raw byte stream");
+  assert.ok(args.includes("-T"));
+  // ssh keeps the first value it sees, so the attachment's own connection wins.
+  assert.ok(args.indexOf("ControlMaster=no") < args.indexOf("ControlMaster=auto"));
+  assert.ok(args.indexOf("ControlPath=none") < args.findIndex((value) => value.startsWith("ControlPath=") && value !== "ControlPath=none"));
+  const target = args.indexOf("dev@example");
+  assert.deepEqual(args.slice(target - 2, target), ["-p", "2222"]);
+  assert.deepEqual(args.slice(target + 1), ["powershell.exe", "-EncodedCommand", "x"]);
+});
+
+test("a worker that refuses TCP forwarding says so instead of blaming Herdr", () => {
+  assert.match(
+    forwardFailureReason("channel 2: open failed: administratively prohibited: open failed"),
+    /refuses TCP forwarding/,
+  );
+  assert.match(forwardFailureReason("unix_listener: cannot bind to path /tmp/x"), /local Herdr socket/);
+  assert.match(forwardFailureReason(""), /failed to start/);
 });
 
 test("local renderer gets a fully Handoff-owned namespace and ignores ambient Herdr state", () => {
@@ -156,58 +204,92 @@ test("streaming relay reuses Handoff SSH policy including control socket and cus
   assert.deepEqual(args.slice(-3), ["-p", "2222", "dev@example"]);
 });
 
-test("Windows PowerShell bridge round-trips bytes through the real named-pipe API", {
+test("the Windows helper carries delayed binary traffic between TCP and the real named pipe", {
   skip: process.platform !== "win32",
-  timeout: 20_000,
+  timeout: 60_000,
 }, async () => {
+  const { randomBytes } = await import("node:crypto");
+  const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
   const logicalName = `C:\\hn-herdr-${process.pid}-${Date.now()}\\herdr-client.sock`;
   const endpoint = `\\\\.\\pipe\\${logicalName}`;
-  const server = net.createServer((socket) => {
-    socket.once("data", (data) => {
-      assert.equal(data.toString("utf8"), "ping");
-      socket.end(Buffer.from("pong"));
-    });
-  });
+  const server = net.createServer((socket) => socket.pipe(socket));
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(endpoint, resolve);
   });
 
-  const args = windowsClientBridgeArgs(logicalName);
-  const child = spawn("powershell.exe", args.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
-  let stdout = Buffer.alloc(0);
+  const port = 41000 + (randomBytes(2).readUInt16BE(0) % 4000);
+  const stage = mkdtempSync(join(tmpdir(), "hn-herdr-test-"));
+  const scriptPath = join(stage, "bridge.ps1");
+  writeFileSync(scriptPath, `\uFEFF${windowsPipeBridgeScript(logicalName, port, 30_000)}`, "utf8");
+  const child = spawn("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+    `. ([scriptblock]::Create((Get-Content -LiteralPath '${scriptPath}' -Raw)))`,
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
   let stderr = "";
-  child.stdout.on("data", (chunk) => { stdout = Buffer.concat([stdout, chunk]); });
+  child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
-  child.stdin.write(Buffer.from("ping"));
 
+  const deadline = Date.now() + 30_000;
+  while (!stdout.includes("HN-READY") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(stdout.includes("HN-READY"), `helper never bound: ${stdout} ${stderr}`);
+
+  const wire = net.connect({ host: "127.0.0.1", port });
+  await new Promise((resolve, reject) => {
+    wire.once("connect", resolve);
+    wire.once("error", reject);
+  });
+  let inbox = Buffer.alloc(0);
+  wire.on("data", (chunk) => { inbox = Buffer.concat([inbox, chunk]); });
+
+  // The stdio bridge this replaced delivered only what was buffered before the
+  // remote command started. Every later write vanished, so the delays matter.
+  for (const [waitMs, size] of [[0, 64], [1500, 64], [1500, 64], [2000, 4096], [6000, 2048]]) {
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    inbox = Buffer.alloc(0);
+    const payload = randomBytes(size);
+    wire.write(payload);
+    const until = Date.now() + 10_000;
+    while (inbox.length < size && Date.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(inbox.equals(payload), `binary payload of ${size} bytes after ${waitMs}ms did not survive`);
+  }
+
+  wire.end();
   const code = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
   });
-  await new Promise((resolve) => server.close(resolve));
-
   assert.equal(code, 0, stderr);
-  assert.equal(stdout.toString("utf8"), "pong");
+  await new Promise((resolve) => server.close(resolve));
+  rmSync(stage, { recursive: true, force: true });
 });
 
-// Real hardware, 2026-08-30, macOS controller -> native Windows worker.
-// Windows OpenSSH handed the bridge only the stdin buffered before the command
-// started and dropped every later write. The desk drew its first frame and then
-// ignored every keystroke, while changes made outside the client still rendered.
-// Never let a transport that cannot carry input present itself as available.
-test("a Windows worker cannot carry the thin byte bridge over shell stdio", () => {
-  const worker = { target: "user@host", platform: "windows", arch: "x64" };
-  const attached = attachThinHerdr(worker, "hn-12345678-main");
-  assert.equal(attached.available, false);
-  assert.equal(attached.reason, THIN_WINDOWS_STDIN_BLOCKER);
-  assert.match(attached.reason, /stdin/);
-});
-
-// The renderer only ever saw one frame per attach because a redirected console
-// stdout holds small writes. Copy loops must flush what they read.
-test("the Windows bridge flushes every frame it reads back to the client", () => {
-  const script = windowsClientBridgeScript("C:\\Users\\dev\\herdr-client.sock");
-  assert.match(script, /\$stdout\.Flush\(\)/);
-  assert.doesNotMatch(script, /\$pipe\.CopyToAsync\(\$stdout\)/);
+test("the Windows helper refuses a busy loopback port so the attach can retry", {
+  skip: process.platform !== "win32",
+  timeout: 30_000,
+}, async () => {
+  const blocker = net.createServer(() => {});
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  const port = blocker.address().port;
+  const child = spawn("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(windowsPipeBridgeScript("C:\\hn\\nothing.sock", port, 5000), "utf16le").toString("base64"),
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+  const code = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  await new Promise((resolve) => blocker.close(resolve));
+  assert.match(stdout, /HN-PORTBUSY/);
+  assert.equal(code, 3);
 });

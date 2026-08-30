@@ -548,11 +548,17 @@ Function|C:\Users\Lenovo\.hn\claude-settings.json|C:\Users\Lenovo\.agents\skills
 
 `claude` is Handoff's wrapper function rather than the bare executable, the managed settings path is set, and both skill directories are on `--add-dir`.
 
-## 25. The thin Herdr client renders but cannot be typed into
+## 25. The thin Herdr client rendered but could not be typed into, and what fixed it
 
-The local-Herdr thin transport on `feat/local-herdr-thin-client` opens a real desk on the Mac, draws the whole sidebar and pane, and then ignores every key. Found on 2026-08-30 on the reference macOS controller and native Windows worker. The transport is off for Windows workers because of it.
+Found 2026-08-30 on the reference macOS controller and native Windows worker. The
+thin transport opened a real desk on the Mac, drew the whole sidebar and pane, and
+then ignored every key. Fixed the same day by changing which SSH channel carries
+the bytes. Kept here because the failure looked like a dead link and was not one.
 
-**Windows OpenSSH drops an exec channel's stdin once the command is running.** The bridge is `ssh worker powershell.exe -EncodedCommand <byte pump>` with no tty. The remote side gets whatever stdin was buffered before it started and nothing after. Proven with a bare echo command, one byte at a time:
+**Windows OpenSSH drops an exec channel's stdin once the command is running.** The
+first bridge was `ssh worker powershell.exe -EncodedCommand <byte pump>` with no
+tty. The remote side gets whatever stdin was buffered before it started and nothing
+after. Proven with a bare echo command, one byte at a time:
 
 ```text
 [+0ms]    sending IMMEDIATE-early (1B)
@@ -571,9 +577,13 @@ cmd.exe /c findstr       early no   late no
 powershell.exe with -tt  early yes  late yes
 ```
 
-Only a ConPTY session keeps stdin alive, which is why the legacy `ssh -tt` desk types fine. `-tt` cannot rescue the bridge: a ConPTY echoes, rewrites CR/LF and injects its own escapes into what has to stay a raw byte stream.
+Only a ConPTY session keeps stdin alive, which is why the legacy `ssh -tt` desk
+types fine. `-tt` cannot rescue a byte bridge: a ConPTY echoes, rewrites CR/LF and
+injects its own escapes.
 
-**The symptom read as a dead connection but the link was healthy.** Relay byte counts show the handshake landing in the pre-start buffer, the server answering with a full frame, and then keystrokes going up forever with nothing coming back:
+**The symptom read as a dead connection but the link was healthy.** Relay byte
+counts show the handshake landing in the pre-start buffer, the server answering
+with a full frame, then keystrokes going up forever with nothing coming back:
 
 ```text
 576ms   UP 1537     client handshake
@@ -585,8 +595,56 @@ Only a ConPTY session keeps stdin alive, which is why the legacy `ssh -tt` desk 
 19819ms DOWN 9802   'herdr workspace focus' run over ssh, not typed
 ```
 
-Changes made outside the client still rendered instantly, so the downstream half and the named pipe are fine. `herdr client` against a local server on the same Mac answers keystrokes normally, so the client is fine too.
+**Two smaller faults were found on the way, neither of them the cause.**
+`thinServerCompatible` required `capabilities.detached_server_daemon`, which Herdr
+0.8.2 reports false on every platform, so thin mode could never engage at all. And
+the bridge copied the pipe into a redirected console stdout with `CopyToAsync`,
+which holds small writes.
 
-**Two smaller faults were found and fixed on the way, neither of them the cause.** `thinServerCompatible` required `capabilities.detached_server_daemon`, which Herdr 0.8.2 reports false on every platform, so thin mode could never engage at all. And the bridge copied the pipe into a redirected console stdout with `CopyToAsync`, which holds small writes; it now flushes every read.
+**The fix is a different channel, not a better pump.** See HN-077. `ssh -L` publishes
+the renderer's Unix socket and sshd forwards it to a loopback-only helper on the
+worker, which copies bytes to the existing named pipe. A bare echo helper carried
+the exact traffic pattern that killed the old bridge:
 
-Carrying the client socket needs a transport that is not shell stdio. Nothing here proves one works, so none is claimed.
+```text
+immediate 64B                  exact echo in 63ms
+after 1.5s 64B                 exact echo in 21ms
+after another 1.5s 64B         exact echo in 21ms
+after another 2s 4096B         exact echo in 21ms
+after another 6s 2048B         exact echo in 21ms
+```
+
+Then the real desk, through `hn pc -p` with `HN_HERDR_TRANSPORT=thin`. Every key
+produced a screen update, including after a five second pause:
+
+```text
+typing "alpha beta"      10 keys, 86 to 114 bytes back each
+ctrl-w word delete       114 bytes, "beta" gone from the line
+left / right arrow       43 bytes each
+up arrow, history        930 bytes
+ctrl-c                   181 bytes
+25 character burst       227 bytes
+enter                    141 bytes
+resize 40x120 -> 50x150  19896 bytes, full reflow
+ctrl-b prefix            556 bytes, prefix bar drawn
+```
+
+Worker state across four attaches and one hard `SIGKILL` of the whole controller
+process group: Herdr server still PID 27548 started 08/29 22:50:37, firewall rules
+890 before and after, no `~/.herdr/remote`, no staged helper script left in the home
+directory, no leftover loopback listener, and the Claude settings hash unchanged at
+`1B57348504C1BB52A29E32EF192C3F75762FF030B0C79BA8E2D6D0EBAA72CA23`.
+
+**Still not proven.** Option+Backspace. The pinned 0.8.2 client maps `ESC BS`
+(`\x1b\x08`) to a word delete and drops `ESC DEL` (`\x1b\x7f`), which is what
+Terminal.app and iTerm2 send by default. Legacy passes the bytes straight through to
+PSReadLine instead, so the two transports differ here. A headless pty cannot settle
+it: the client negotiates the Kitty keyboard protocol with a real terminal and never
+did with the harness, so the encoding a real user sends was never tested. Needs a
+human at a real terminal.
+
+**Unrelated but in the way.** The shared `ControlMaster` socket for the worker went
+stale and answered `mux_client_request_session: session request failed: Session open
+refused by peer` while still reporting `Master running`. Every command over it, and
+every `-L` through it, failed until it was removed. The thin attach now opens its own
+connection, so it is immune, but ordinary `hn` commands are not.

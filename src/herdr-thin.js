@@ -2,18 +2,19 @@ import { randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, win32 } from "node:path";
-import { fileURLToPath } from "node:url";
-import { encodePowerShell, runPowerShell } from "./ssh.js";
+import { copyToWorker, powerShellInvocation, runPowerShell, sshSpawnArgs } from "./ssh.js";
 import { ensureCachedRelease, sha256File } from "./runtime-assets.js";
 import { remotePathExpression } from "./worker.js";
 import { quotePowerShell } from "./util.js";
@@ -72,13 +73,25 @@ row_gap = 0
 rows = [["state_icon", "workspace"], ["agent", "state_text"]]
 `;
 
-const RELAY_SCRIPT = fileURLToPath(new URL("./herdr-relay.js", import.meta.url));
-const RELAY_START_TIMEOUT_MS = 5000;
+// The forward is up as soon as sshd answers and the helper binds, so this only
+// has to cover a cold SSH connection, not a Herdr start.
+const FORWARD_READY_TIMEOUT_MS = 30000;
+// How long the worker helper waits for the renderer before giving up and exiting.
+const BRIDGE_ACCEPT_MS = 20000;
+const PORT_ATTEMPTS = 5;
 
 function normalizedArch(value) {
   if (["x64", "amd64", "x86_64"].includes(value)) return "x64";
   if (["arm64", "aarch64"].includes(value)) return "arm64";
   return value;
+}
+
+// Attach latency is the product question, so the stages are separable on demand
+// instead of guessed at afterwards.
+const stageOrigin = Date.now();
+function stage(name) {
+  if (process.env.HN_HERDR_TIMING !== "1") return;
+  process.stderr.write(`hn thin ${name} +${Date.now() - stageOrigin}ms\n`);
 }
 
 function sleepMs(ms) {
@@ -95,22 +108,14 @@ export function thinClientAsset(platform = process.platform, arch = process.arch
   return CLIENT_ASSETS[`${platform}:${normalizedArch(arch)}`] ?? null;
 }
 
-// Real hardware, 2026-08-30. Windows OpenSSH only keeps an exec channel's stdin
-// alive when it allocates a ConPTY. Without -tt it hands the command whatever
-// stdin was buffered before the process started and then silently drops the
-// rest, so the renderer's first frame arrived and every later keystroke went
-// nowhere: a desk that draws and cannot be typed into. -tt is not the answer
-// either, because a ConPTY echoes, rewrites CR/LF and injects its own escapes
-// into what has to stay a raw byte stream. Carrying the client socket needs a
-// transport that is not shell stdio, so keep thin off until one exists.
-export const THIN_WINDOWS_STDIN_BLOCKER =
-  "Windows OpenSSH drops an exec channel's stdin after startup, so the Herdr byte bridge cannot carry keystrokes";
-
-// Windows x64 was the only worker the bridge ever targeted, and the blocker
-// above rules it out, so nothing is supported today. The asset and arch checks
-// stay because they are what a future non-stdio transport still has to satisfy.
+// Real hardware, 2026-08-30. Herdr protocol bytes never ride an SSH exec
+// channel. Windows OpenSSH only keeps exec stdin alive under a ConPTY, so the
+// first bridge drew one frame and then ignored every key, and -tt is no answer
+// because a ConPTY echoes and rewrites what has to stay a raw byte stream.
+// The bytes take a direct-tcpip channel instead: ssh -L publishes the private
+// Unix socket the renderer wants and forwards it to a loopback-only port the
+// worker helper opened for this one attachment.
 export function thinTransportSupported(worker, platform = process.platform, arch = process.arch) {
-  if (worker?.platform === "windows") return false;
   return Boolean(thinClientAsset(platform, arch))
     && worker?.platform === "windows"
     && worker?.arch === "x64";
@@ -231,78 +236,222 @@ export function thinClientSocketPath(server) {
 
 // Windows Herdr uses interprocess::GenericNamespaced for local sockets. On
 // Windows that is a named pipe whose logical name is the socket path string.
-// This bridge connects to that exact already-running pipe and copies bytes. It
-// contains deliberately no Herdr executable path and no start/restart logic.
-export function windowsClientBridgeScript(clientSocketPath) {
-  return `$ErrorActionPreference = 'Stop'
-$pipeName = ${quotePowerShell(clientSocketPath)}
-$pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
-try {
-  $pipe.Connect(5000)
-  $stdin = [Console]::OpenStandardInput()
-  $stdout = [Console]::OpenStandardOutput()
-  # Keystrokes into the pipe are unbuffered, so a copy task is fine going up.
-  $toPipe = $stdin.CopyToAsync($pipe)
-  # Coming down it is not. A redirected console stdout keeps a small write
-  # buffer, so CopyToAsync held every frame after the first big one and the
-  # desk looked opened but dead. Flush each read instead.
-  $buffer = New-Object byte[] 65536
-  while ($true) {
-    $read = $pipe.Read($buffer, 0, $buffer.Length)
-    if ($read -le 0) { break }
-    $stdout.Write($buffer, 0, $read)
-    $stdout.Flush()
-    if ($toPipe.IsFaulted) { throw $toPipe.Exception.GetBaseException() }
+// This helper connects to that exact already-running pipe and copies bytes. It
+// holds no Herdr path and no start, stop, restart or update logic.
+//
+// A loopback port is reachable by every account on the machine, which the pipe
+// itself is not, so the helper drops any connection whose process does not run
+// as the same Windows user. That keeps the pipe's own trust boundary.
+//
+// The copying is C# because a PowerShell scriptblock gets no runspace on a
+// thread-pool thread, so the obvious Task-based version silently does nothing.
+export function windowsPipeBridgeSource() {
+  return `using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Net;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Threading;
+public static class HnHerdrBridge {
+  [DllImport("iphlpapi.dll")] static extern uint GetExtendedTcpTable(IntPtr t, ref int size, bool order, int af, int cls, int res);
+  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr token);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [StructLayout(LayoutKind.Sequential)] struct Row { public uint state, local, localPort, remote, remotePort, pid; }
+  public static int Run(string pipeName, int port, int acceptMs) {
+    TcpListener listener = new TcpListener(IPAddress.Loopback, port);
+    try { listener.Start(); }
+    catch (SocketException) { Console.Out.WriteLine("HN-PORTBUSY"); Console.Out.Flush(); return 3; }
+    Console.Out.WriteLine("HN-READY");
+    Console.Out.Flush();
+    try {
+      IAsyncResult pending = listener.BeginAcceptTcpClient(null, null);
+      if (!pending.AsyncWaitHandle.WaitOne(acceptMs)) { Console.Error.WriteLine("HN-NOCLIENT"); return 4; }
+      using (TcpClient client = listener.EndAcceptTcpClient(pending)) {
+        listener.Stop();
+        client.NoDelay = true;
+        int peer = ((IPEndPoint)client.Client.RemoteEndPoint).Port;
+        if (Sid(OwnerPid(port, peer)) != WindowsIdentity.GetCurrent().User.Value) {
+          Console.Error.WriteLine("HN-DENIED");
+          return 5;
+        }
+        NetworkStream wire = client.GetStream();
+        using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous)) {
+          pipe.Connect(5000);
+          Thread down = new Thread(delegate() { Pump(pipe, wire); });
+          down.IsBackground = true;
+          down.Start();
+          Pump(wire, pipe);
+        }
+      }
+    } finally { try { listener.Stop(); } catch {} }
+    return 0;
   }
+  static void Pump(Stream from, Stream to) {
+    byte[] buffer = new byte[65536];
+    try { int n; while ((n = from.Read(buffer, 0, buffer.Length)) > 0) { to.Write(buffer, 0, n); to.Flush(); } } catch {}
+  }
+  static string Sid(int pid) {
+    if (pid <= 0) return null;
+    IntPtr proc = OpenProcess(0x1000, false, pid);
+    if (proc == IntPtr.Zero) return null;
+    try {
+      IntPtr token;
+      if (!OpenProcessToken(proc, 0x8, out token)) return null;
+      try { return new WindowsIdentity(token).User.Value; } finally { CloseHandle(token); }
+    } finally { CloseHandle(proc); }
+  }
+  static int OwnerPid(int local, int remote) {
+    int size = 0;
+    GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, 5, 0);
+    IntPtr buffer = Marshal.AllocHGlobal(size);
+    try {
+      if (GetExtendedTcpTable(buffer, ref size, false, 2, 5, 0) != 0) return -1;
+      int rows = Marshal.ReadInt32(buffer);
+      int stride = Marshal.SizeOf(typeof(Row));
+      for (int i = 0; i < rows; i++) {
+        Row row = (Row)Marshal.PtrToStructure((IntPtr)((long)buffer + 4 + i * stride), typeof(Row));
+        if (Port(row.localPort) == local && Port(row.remotePort) == remote) return (int)row.pid;
+      }
+      return -1;
+    } finally { Marshal.FreeHGlobal(buffer); }
+  }
+  static int Port(uint value) { return (int)(((value & 0xff) << 8) | ((value >> 8) & 0xff)); }
+}`;
+}
+
+export function windowsPipeBridgeScript(pipePath, port, acceptMs = BRIDGE_ACCEPT_MS) {
+  return `$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+${windowsPipeBridgeSource()}
+'@
+exit [HnHerdrBridge]::Run(${quotePowerShell(pipePath)}, ${Number(port)}, ${Number(acceptMs)})
+`;
+}
+
+// The helper is far too big for a Windows OpenSSH argv even gzipped, so it
+// travels by scp like Handoff's other oversized scripts. Calling a .ps1 by path
+// is what the worker's execution policy blocks, hence the scriptblock. The name
+// is random per attachment and the runner deletes it on the way out.
+export function windowsPipeBridgeRunner(remoteScript) {
+  return `$hnScript = Join-Path $HOME ${quotePowerShell(remoteScript)}
+try {
+  . ([scriptblock]::Create((Get-Content -LiteralPath $hnScript -Raw -ErrorAction Stop)))
 } finally {
-  $pipe.Dispose()
+  Remove-Item -LiteralPath $hnScript -Force -ErrorAction SilentlyContinue
 }
 `;
 }
 
-export function windowsClientBridgeArgs(clientSocketPath) {
-  const encoded = encodePowerShell(windowsClientBridgeScript(clientSocketPath));
-  if (encoded.length > 6000) throw new Error("Handoff Herdr byte bridge exceeded the safe Windows OpenSSH argv budget");
+export function windowsPipeBridgeArgs(remoteScript) {
+  const invocation = powerShellInvocation(windowsPipeBridgeRunner(remoteScript));
+  if (!invocation.args) throw new Error("Handoff Herdr bridge runner exceeded the safe Windows OpenSSH argv budget");
+  return invocation.args;
+}
+
+function stageBridgeScript(worker, pipePath, port) {
+  const remote = `.hn-herdr-bridge-${randomBytes(8).toString("hex")}.ps1`;
+  const stage = mkdtempSync(join(tmpdir(), "hn-herdr-ps-"));
+  const local = join(stage, "bridge.ps1");
+  // The BOM is what makes Windows PowerShell read the file as UTF-8.
+  writeFileSync(local, `\uFEFF${windowsPipeBridgeScript(pipePath, port)}`, "utf8");
+  try {
+    copyToWorker(worker, local, remote);
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+  return remote;
+}
+
+// The renderer wants a Unix socket, so let SSH publish one. Nothing of Handoff's
+// sits in the byte path: sshd forwards the socket to the helper's loopback port
+// over a direct-tcpip channel.
+//
+// The attachment owns its SSH connection. A shared ControlMaster would hand the
+// forward's lifetime to a connection Handoff did not open and cannot close, and
+// a stale master refuses new sessions outright. ssh keeps the first value it
+// sees for an option, so these win over the shared policy that follows.
+export function thinForwardArgs(worker, socketPath, port, remoteArgs) {
   return [
-    "powershell.exe",
-    "-NoLogo",
-    "-NoProfile",
-    "-NonInteractive",
-    "-EncodedCommand",
-    encoded,
+    "-T",
+    "-o", "ExitOnForwardFailure=yes",
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=none",
+    "-L", `${socketPath}:127.0.0.1:${port}`,
+    ...sshSpawnArgs(worker),
+    ...remoteArgs,
   ];
 }
 
-function relaySocketLocation() {
-  // tmpdir() is world-shared on some Unix systems. Put the socket inside a
-  // random private directory so there is no exposure window between listen()
-  // creating the socket and the relay chmodding it to 0600.
+function ephemeralLoopbackPort() {
+  return 20000 + (randomBytes(2).readUInt16BE(0) % 40000);
+}
+
+function forwardSocketLocation() {
+  // tmpdir() is world-shared on some Unix systems, and ssh creates the forward
+  // socket world-writable. Put it inside a private directory so no other local
+  // account can reach the renderer's end of the channel.
   const dir = mkdtempSync(join(tmpdir(), "hn-herdr-"));
   chmodSync(dir, 0o700);
   return { dir, socketPath: join(dir, "relay.sock") };
 }
 
-function startRelay(worker, remoteArgs) {
-  const { dir, socketPath } = relaySocketLocation();
-  const payload = Buffer.from(JSON.stringify({
-    worker,
-    socketPath,
-    remoteArgs,
-    parentPid: process.pid,
-  }), "utf8").toString("base64url");
-  const child = spawn(process.execPath, [RELAY_SCRIPT, payload], {
-    stdio: ["ignore", "ignore", "inherit"],
-    windowsHide: true,
-  });
+function startThinForward(worker, pipePath) {
+  let last = "the SSH forward for the Herdr renderer never became ready";
+  for (let attempt = 0; attempt < PORT_ATTEMPTS; attempt += 1) {
+    const port = ephemeralLoopbackPort();
+    const remoteScript = stageBridgeScript(worker, pipePath, port);
+    const { dir, socketPath } = forwardSocketLocation();
+    const logPath = join(dir, "forward.log");
+    // The CLI attach is synchronous, so the helper reports readiness through a
+    // file this can poll rather than a stream this would have to await.
+    const log = openSync(logPath, "a+");
+    let child;
+    try {
+      child = spawn("ssh", thinForwardArgs(worker, socketPath, port, windowsPipeBridgeArgs(remoteScript)), {
+        stdio: ["ignore", log, log],
+        windowsHide: true,
+      });
+    } finally {
+      closeSync(log);
+    }
 
-  const deadline = Date.now() + RELAY_START_TIMEOUT_MS;
-  while (!existsSync(socketPath) && Date.now() < deadline) sleepMs(10);
-  if (!existsSync(socketPath)) {
+    const deadline = Date.now() + FORWARD_READY_TIMEOUT_MS;
+    let text = "";
+    while (Date.now() < deadline) {
+      text = readFileSync(logPath, "utf8");
+      if (/HN-READY/.test(text) || /HN-PORTBUSY/.test(text) || child.exitCode !== null) break;
+      sleepMs(50);
+    }
+
+    if (/HN-READY/.test(text) && existsSync(socketPath)) {
+      return { ready: true, child, socketPath, dir, logPath, port };
+    }
+
     try { child.kill("SIGTERM"); } catch {}
+    if (/HN-PORTBUSY/.test(text)) {
+      rmSync(dir, { recursive: true, force: true });
+      last = `loopback port ${port} on the worker was busy`;
+      continue;
+    }
+    const detail = text.trim().split("\n").filter((line) => !line.startsWith("HN-")).slice(-3).join("; ");
     rmSync(dir, { recursive: true, force: true });
-    return { ready: false, reason: "the local Handoff Herdr relay did not become ready", child, socketPath, dir };
+    return { ready: false, reason: forwardFailureReason(detail) };
   }
-  return { ready: true, child, socketPath, dir };
+  return { ready: false, reason: `${last} after ${PORT_ATTEMPTS} tries` };
+}
+
+export function forwardFailureReason(detail) {
+  const text = String(detail ?? "");
+  if (/administratively prohibited|open failed/i.test(text)) {
+    return "the worker's sshd refuses TCP forwarding, so the Herdr renderer has no way in (AllowTcpForwarding)";
+  }
+  if (/cannot bind to path|Address already in use/i.test(text)) {
+    return `the local Herdr socket could not be created: ${text}`;
+  }
+  return `the SSH forward for the Herdr renderer failed to start${text ? `: ${text}` : ""}`;
 }
 
 export function localThinClientEnvironment(local, socketPath, base = process.env) {
@@ -330,13 +479,12 @@ export function localThinClientEnvironment(local, socketPath, base = process.env
 
 export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
   if (!thinTransportSupported(worker)) {
-    const reason = worker?.platform === "windows"
-      ? THIN_WINDOWS_STDIN_BLOCKER
-      : `thin client unsupported for ${process.platform}/${process.arch} -> ${worker?.platform}/${worker?.arch}`;
-    return { available: false, reason };
+    return { available: false, reason: `thin client unsupported for ${process.platform}/${process.arch} -> ${worker?.platform}/${worker?.arch}` };
   }
 
+  stage("probe-start");
   const observed = readiness ?? probeThinReadiness(worker, runtime);
+  stage("probe-done");
   if (!thinWindowsSshShellCompatible(observed.sshShell)) {
     return { available: false, reason: `Windows OpenSSH DefaultShell '${observed.sshShell || "unknown"}' cannot safely carry the raw Herdr byte stream; use cmd.exe or pwsh.exe` };
   }
@@ -354,15 +502,18 @@ export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
     return { available: false, reason: error.message };
   }
 
-  let relay = null;
+  let forward = null;
   try {
-    relay = startRelay(worker, windowsClientBridgeArgs(clientSocket));
-    if (!relay.ready) return { available: false, reason: relay.reason };
+    stage("forward-start");
+    forward = startThinForward(worker, clientSocket);
+    if (!forward.ready) return { available: false, reason: forward.reason };
+    stage("forward-ready");
 
     const result = spawnSync(local.binary, ["client"], {
       stdio: "inherit",
-      env: localThinClientEnvironment(local, relay.socketPath),
+      env: localThinClientEnvironment(local, forward.socketPath),
     });
+    stage("client-exit");
     if (result.error) throw new Error(`local Herdr client failed to start: ${result.error.message}`);
     const code = result.status ?? 1;
     if (code !== 0) {
@@ -373,9 +524,9 @@ export function attachThinHerdr(worker, runtime, { readiness = null } = {}) {
     }
     return { available: true, code: 0 };
   } finally {
-    if (relay) {
-      try { relay.child.kill("SIGTERM"); } catch {}
-      try { rmSync(relay.dir, { recursive: true, force: true }); } catch {}
+    if (forward) {
+      try { forward.child.kill("SIGTERM"); } catch {}
+      try { rmSync(forward.dir, { recursive: true, force: true }); } catch {}
     }
   }
 }
