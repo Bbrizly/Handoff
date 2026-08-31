@@ -98,15 +98,32 @@ jobs:
             $paneId = [string]$panes.result.panes[0].pane_id
             if ([string]::IsNullOrWhiteSpace($paneId)) { throw "pane id missing: $panesRaw" }
 
+            # Workspace creation can return before ConPTY has finished launching
+            # PowerShell. `pane run` is input injection, so firing it before the
+            # shell owns the PTY is a real race. Prove shell readiness first.
+            $paneReady = $false
+            $processInfo = ''
+            for ($i = 0; $i -lt 80; $i++) {
+              $processInfo = (& $exe --session $session pane process-info --pane $paneId 2>$null | Out-String).Trim()
+              if ($LASTEXITCODE -eq 0 -and $processInfo -match '(?i)powershell(?:\.exe)?') { $paneReady = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $paneReady) { throw "PowerShell pane did not become ready. process-info: $processInfo" }
+            Start-Sleep -Milliseconds 500
+
             & $exe --session $session pane run $paneId 'Write-Output HN_MIRROR_SMOKE' | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'pane run failed' }
             $seen = $false
-            for ($i = 0; $i -lt 20; $i++) {
-              $read = (& $exe --session $session pane read $paneId --lines 40 | Out-String)
+            $read = ''
+            for ($i = 0; $i -lt 80; $i++) {
+              $read = (& $exe --session $session pane read $paneId --lines 80 | Out-String)
               if ($read -match 'HN_MIRROR_SMOKE') { $seen = $true; break }
               Start-Sleep -Milliseconds 250
             }
-            if (-not $seen) { throw 'ConPTY smoke output never appeared in pane readback' }
+            if (-not $seen) {
+              $processInfo = (& $exe --session $session pane process-info --pane $paneId 2>$null | Out-String).Trim()
+              throw "ConPTY smoke output never appeared. process-info: $processInfo; pane: $read"
+            }
           } finally {
             & $exe --session $session server stop *> $null
             if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
