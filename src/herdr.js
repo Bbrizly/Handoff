@@ -17,6 +17,7 @@ import { windowsDetachedLaunchScript } from "./windows-detach.js";
 import { fail, quotePosix, quotePowerShell, shortHash, slug } from "./util.js";
 import { HANDOFF_CLAUDE_SETTINGS_TOKEN, MANAGED_REPAIR_MARKER } from "./statusline.js";
 import { attachThinHerdr, thinTransportMode } from "./herdr-thin.js";
+import { attachResponsiveHerdr } from "./herdr-responsive.js";
 
 export const HERDR_VERSION = "0.8.2";
 
@@ -55,6 +56,10 @@ const HERDR_ASSETS = {
 
 const CONFIG_RELATIVE = ".hn/herdr/config.toml";
 
+function herdrConfigRelative(worker) {
+  return worker?.__hnHerdrConfigRelative ?? CONFIG_RELATIVE;
+}
+
 export function herdrReleaseUrl(asset) {
   return `https://github.com/herdrdev/herdr/releases/download/v${HERDR_VERSION}/${asset.file}`;
 }
@@ -69,6 +74,7 @@ export function herdrInstallDir() {
 }
 
 export function herdrBinaryRelative(worker) {
+  if (worker?.__hnHerdrBinaryRelative) return worker.__hnHerdrBinaryRelative;
   const asset = herdrAssetFor(worker.platform, worker.arch);
   return `${herdrInstallDir()}/${asset ? asset.binary : "herdr"}`;
 }
@@ -120,14 +126,14 @@ ${terminal}
 }
 
 function windowsPrelude(worker, runtime) {
-  return `$env:HERDR_CONFIG_PATH = ${remotePathExpression(CONFIG_RELATIVE)}
+  return `$env:HERDR_CONFIG_PATH = ${remotePathExpression(herdrConfigRelative(worker))}
 $hnHerdr = ${remotePathExpression(herdrBinaryRelative(worker))}
 $hnSession = ${quotePowerShell(runtime)}
 `;
 }
 
 function posixPrelude(worker, runtime) {
-  return `HERDR_CONFIG_PATH="$HOME/${CONFIG_RELATIVE}"
+  return `HERDR_CONFIG_PATH="$HOME/${herdrConfigRelative(worker)}"
 export HERDR_CONFIG_PATH
 hn_herdr="$HOME/${herdrBinaryRelative(worker)}"
 hn_session=${quotePosix(runtime)}
@@ -201,11 +207,13 @@ function extractHerdr(asset, archivePath) {
 
 export function ensureHerdrConfig(worker) {
   const toml = herdrConfigToml(worker.platform);
+  const configRelative = herdrConfigRelative(worker);
+  const configDir = configRelative.slice(0, configRelative.lastIndexOf("/"));
   if (worker.platform === "windows") {
     runPowerShell(worker, `$ErrorActionPreference = 'Stop'
-$hnDir = ${remotePathExpression(".hn/herdr")}
+$hnDir = ${remotePathExpression(configDir)}
 New-Item -ItemType Directory -Force -Path $hnDir | Out-Null
-Set-Content -LiteralPath ${remotePathExpression(CONFIG_RELATIVE)} -Value ${quotePowerShell(toml)} -Encoding utf8
+Set-Content -LiteralPath ${remotePathExpression(configRelative)} -Value ${quotePowerShell(toml)} -Encoding utf8
 $hnBin = ${remotePathExpression(".hn/bin")}
 New-Item -ItemType Directory -Force -Path $hnBin | Out-Null
 $hnShell = ${remotePathExpression(".hn/bin/hn-powershell.cmd")}
@@ -215,8 +223,8 @@ Set-Content -LiteralPath $hnBootstrap -Value ${quotePowerShell(windowsShellBoots
 `);
     return;
   }
-  runPosix(worker, `mkdir -p "$HOME/.hn/herdr"
-printf '%s' ${quotePosix(toml)} > "$HOME/${CONFIG_RELATIVE}"
+  runPosix(worker, `mkdir -p "$HOME/${configDir}"
+printf '%s' ${quotePosix(toml)} > "$HOME/${configRelative}"
 `);
 }
 
@@ -523,7 +531,21 @@ export function attachHerdr(worker, runtime, backend = {}) {
   const healthy = backend.healthy ?? deskIsHealthy;
   const transport = backend.transport ?? thinTransportMode();
 
-  if (!backend.attach && transport !== "legacy") {
+  if (!backend.attach && transport === "mirror") {
+    const mirror = attachResponsiveHerdr(worker, runtime);
+    if (!mirror.available) {
+      fail(`Responsive Herdr mirror is unavailable: ${mirror.reason}`);
+    }
+    const result = { code: mirror.code, stdout: "", stderr: "" };
+    if (result.code === 0) return { ...result, desk: "detached" };
+    if (healthy(worker, runtime)) return { ...result, desk: "detached" };
+    fail(
+      `Lost the responsive local mirror connection to the persistent desk on ${worker.target} (exit ${result.code}).\n`
+      + "Try: hn doctor",
+    );
+  }
+
+  if (!backend.attach && ["auto", "thin"].includes(transport)) {
     const thin = attachThinHerdr(worker, runtime);
     if (thin.available) {
       const result = { code: thin.code, stdout: "", stderr: "" };

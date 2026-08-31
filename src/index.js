@@ -63,6 +63,12 @@ import {
   probeHerdrDesk,
   runInHerdrProject,
 } from "./herdr.js";
+import {
+  ensureResponsiveHerdrInstalled,
+  responsiveHerdrRequested,
+  responsiveHerdrWorker,
+  responsiveRuntimeName,
+} from "./herdr-responsive.js";
 import { runInteractiveRemoteCommand, runRemoteCommand, sshTransportFailed } from "./remote.js";
 import {
   claudeProfileLinks,
@@ -572,12 +578,24 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
   ensureWorkspaceSync(config, context);
   worker = context.worker;
 
-  if (worker.herdrVersion !== HERDR_VERSION) {
+  const responsive = responsiveHerdrRequested();
+  if (responsive) {
+    // The mirror runtime is deliberately stacked beside the official stable
+    // runtime. Never replace the user's proven 0.8.2 desk while dogfooding.
+    ensureHerdrInstalled(worker, { quiet: false });
+    if (worker.herdrVersion !== HERDR_VERSION) {
+      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
+    }
+    ensureResponsiveHerdrInstalled(worker, { quiet: false });
+    worker = responsiveHerdrWorker(worker);
+    context = { ...context, worker };
+  } else if (worker.herdrVersion !== HERDR_VERSION) {
     ensureHerdrInstalled(worker, { quiet: false });
     worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
     context = { ...context, worker };
   }
-  const runtime = herdrRuntimeName(config.controllerId, context.name);
+  const stableRuntime = herdrRuntimeName(config.controllerId, context.name);
+  const runtime = responsive ? responsiveRuntimeName(stableRuntime) : stableRuntime;
   // The Herdr config, the pane shell shim, and shell.ps1 ship with Handoff, not
   // with the pinned binary. Gating them on the install left every worker that
   // already had Herdr on the old files, so its panes started a bare shell: no
@@ -594,9 +612,13 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
   // A cached herdrVersion is only a claim about the worker. The probe is the
   // fact, so a binary that went missing gets put back before the desk starts.
   if (!probe.installed) {
-    ensureHerdrInstalled(worker, { quiet: false });
-    worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
-    context = { ...context, worker };
+    if (responsive) {
+      ensureResponsiveHerdrInstalled(worker, { quiet: false });
+    } else {
+      ensureHerdrInstalled(worker, { quiet: false });
+      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
+      context = { ...context, worker };
+    }
   }
   const workspace = targetWorkspace(context);
   const agentDirectories = handoffAgentDirectories(workspace);

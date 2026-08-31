@@ -49,12 +49,9 @@ const ASSETS = {
     file: "herdr-mirror-macos-x86_64",
     sha256: "ae255d36f935b66ac7585e7e4157bb7bd02a8598136f5465ef143b7cced64c2f",
   },
-  // Filled only after the pinned Windows artifact has completed and its binary
-  // checksum has been independently verified. Mirror mode refuses to install
-  // while this remains empty; stable thin/legacy mode is unaffected.
   "windows:x64": {
     file: "herdr-mirror-windows-x86_64.exe",
-    sha256: "",
+    sha256: "3e6fd237375940724c2085adb477f76b5f6d1d42f204913055dda025bd4863a9",
   },
 };
 
