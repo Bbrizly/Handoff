@@ -1,0 +1,108 @@
+name: Apply responsive Herdr hardening
+
+on:
+  push:
+    branches:
+      - feat/herdr-responsive-data-plane
+    paths:
+      - .github/workflows/apply-responsive-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: feat/herdr-responsive-data-plane
+
+      - name: Apply narrow hardening patch
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/herdr.js",
+              '''// Herdr is Apache-2.0 and is downloaded from its immutable GitHub release,\n// checksum-verified on the controller, then copied to the worker.''',
+              '''// The default persistence runtime is official Apache-2.0 Herdr v0.8.2,\n// checksum-verified on the controller, then copied to the worker. The explicit\n// responsive-mirror dogfood runtime is a separate pinned AGPL-3.0-or-later\n// third-party build documented in THIRD_PARTY_NOTICES.md.''',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              '''// Prefer Herdr's local thin-client architecture when the controller/worker pair\n// supports the pinned Windows bridge. Handoff still owns the Windows server,\n// config and persistence lifetime; the local Herdr process is only the renderer.\n// Any pre-launch compatibility failure falls back to the proven ssh-tty path in\n// auto mode. Tests can continue injecting backend.attach without touching the\n// real thin-client runtime.''',
+              '''// Default auto mode prefers the official local thin client and preserves the\n// proven legacy fallback. Explicit mirror mode is intentionally separate: it\n// connects a pinned responsive Herdr client to a separately named responsive\n// desk and never falls back across protocol/runtime boundaries.''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '''    ensureResponsiveHerdrInstalled(worker, { quiet: false });\n    worker = responsiveHerdrWorker(worker);\n    context = { ...context, worker };\n  } else if (worker.herdrVersion !== HERDR_VERSION) {''',
+              '''    context = { ...context, worker };\n    ensureResponsiveHerdrInstalled(worker, { quiet: false });\n  } else if (worker.herdrVersion !== HERDR_VERSION) {''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '''  const stableRuntime = herdrRuntimeName(config.controllerId, context.name);\n  const runtime = responsive ? responsiveRuntimeName(stableRuntime) : stableRuntime;''',
+              '''  const stableRuntime = herdrRuntimeName(config.controllerId, context.name);\n  const runtime = responsive ? responsiveRuntimeName(stableRuntime) : stableRuntime;\n  // Internal runtime overrides must never enter persisted worker metadata.\n  // `worker` remains the real machine; `deskWorker` is an ephemeral Herdr view.\n  let deskWorker = responsive ? responsiveHerdrWorker(worker) : worker;''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '  ensureHerdrConfig(worker);\n\n  // The desk probe has to happen anyway',
+              '  ensureHerdrConfig(deskWorker);\n\n  // The desk probe has to happen anyway',
+          )
+
+          replace_once(
+              "src/index.js",
+              '  const probe = probeHerdrDesk(worker, runtime, managedGuard(context, roots));',
+              '  const probe = probeHerdrDesk(deskWorker, runtime, managedGuard(context, roots));',
+          )
+
+          replace_once(
+              "src/index.js",
+              '''  if (probe.repairNeeded) {\n    worker = repairManagedAssets(config, context, roots);\n    context = { ...context, worker };\n  }''',
+              '''  if (probe.repairNeeded) {\n    worker = repairManagedAssets(config, context, roots);\n    context = { ...context, worker };\n    deskWorker = responsive ? responsiveHerdrWorker(worker) : worker;\n  }''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '''  if (!probe.installed) {\n    if (responsive) {\n      ensureResponsiveHerdrInstalled(worker, { quiet: false });\n    } else {\n      ensureHerdrInstalled(worker, { quiet: false });\n      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });\n      context = { ...context, worker };\n    }\n  }\n  const workspace = targetWorkspace(context);''',
+              '''  if (!probe.installed) {\n    if (responsive) {\n      ensureResponsiveHerdrInstalled(worker, { quiet: false });\n    } else {\n      ensureHerdrInstalled(worker, { quiet: false });\n      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });\n      context = { ...context, worker };\n    }\n    deskWorker = responsive ? responsiveHerdrWorker(worker) : worker;\n  }\n  if (probe.repairNeeded || !probe.installed) ensureHerdrConfig(deskWorker);\n  const workspace = targetWorkspace(context);''',
+          )
+
+          replace_once("src/index.js", "    ensureHerdrServer(worker, runtime, {", "    ensureHerdrServer(deskWorker, runtime, {")
+          replace_once("src/index.js", "  const project = ensureHerdrProject(worker, runtime, {", "  const project = ensureHerdrProject(deskWorker, runtime, {")
+          replace_once("src/index.js", "  bootstrapHerdrProjectPane(worker, runtime, project.workspaceId, {", "  bootstrapHerdrProjectPane(deskWorker, runtime, project.workspaceId, {")
+          replace_once("src/index.js", "    runInHerdrProject(worker, runtime, project.workspaceId, remoteArgs);", "    runInHerdrProject(deskWorker, runtime, project.workspaceId, remoteArgs);")
+          replace_once("src/index.js", "  const attached = attachHerdr(worker, runtime);", "  const attached = attachHerdr(deskWorker, runtime);")
+          PY
+
+      - name: Verify tests and static checks
+        run: |
+          npm test
+          npm run check
+
+      - name: Assert runtime overrides are not persisted
+        run: |
+          if grep -R '__hnHerdr' src/index.js | grep -E 'persistWorkerMetadata|updateConfig'; then
+            echo 'runtime-only Herdr fields must not enter worker persistence' >&2
+            exit 1
+          fi
+
+      - name: Commit hardening
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/herdr.js src/index.js
+          git diff --cached --check
+          git commit -m "fix: isolate responsive Herdr runtime state"
+          git push origin HEAD:feat/herdr-responsive-data-plane
