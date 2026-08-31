@@ -270,3 +270,15 @@ See `THIRD_PARTY_NOTICES.md`.
 ## License
 
 MIT. See [`LICENSE`](./LICENSE).
+
+### Codex thin client (dogfood)
+
+Current Codex supports a remote TUI that connects to `codex app-server`. Handoff can use that boundary so the controller renders the stock Codex TUI locally while the selected Windows worker owns the stateful agent runtime, project cwd, tools, and execution. The app-server binds only `127.0.0.1`; Handoff reaches it through a disposable SSH local forward.
+
+```bash
+HN_CODEX_TRANSPORT=app-server hn codex
+```
+
+`auto` is the default and prefers this path when both controller and worker expose the required Codex features at the same version; otherwise it falls back to the existing remote-terminal behavior. `HN_CODEX_TRANSPORT=legacy` forces the old path. Management commands such as `hn codex login`, `mcp`, `update`, and `exec` remain worker-side.
+
+Inspect or stop the persistent worker backend with `hn codex-server status` and `hn codex-server stop`.
