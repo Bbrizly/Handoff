@@ -309,7 +309,7 @@ Done, measured on the Lenovo:
 - asking for the same project twice reconnects instead of duplicating, before and after a server restart;
 - a long-running Node process started from the Mac stayed alive across many closed SSH sessions;
 - Claude launched into a project was detected as an agent with an `idle` state, and asking again focused it instead of starting a second one;
-- attaching renders the desk over Handoff's own SSH PTY, with mouse tracking and Handoff's window title.
+- the official local thin client now renders the Windows desk on the controller through Handoff's SSH direct-tcpip bridge; the legacy worker-side SSH PTY remains an explicit fallback.
 
 Added 2026-08-28, measured on the Lenovo:
 
@@ -320,6 +320,7 @@ Added 2026-08-28, measured on the Lenovo:
 
 Remaining:
 
+- **responsive mirror A/B gate (HN-078):** explicit `HN_HERDR_TRANSPORT=mirror` is mechanically green and isolated, but it must prove materially more local-feeling typing/resize/mouse/scrollback on the reference Mac → Lenovo path before it can replace the official thin default;
 - a human in the loop: click through the sidebar, close the terminal for an hour, come back;
 - **reboot recovery is untested.** Nobody has rebooted the worker and run `hn pc -p`. Do not record this as solved until someone does;
 - `hn attention` for the agents that are waiting;

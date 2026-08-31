@@ -63,6 +63,12 @@ import {
   probeHerdrDesk,
   runInHerdrProject,
 } from "./herdr.js";
+import {
+  ensureResponsiveHerdrInstalled,
+  responsiveHerdrRequested,
+  responsiveHerdrWorker,
+  responsiveRuntimeName,
+} from "./herdr-responsive.js";
 import { runInteractiveRemoteCommand, runRemoteCommand, sshTransportFailed } from "./remote.js";
 import {
   claudeProfileLinks,
@@ -572,36 +578,57 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
   ensureWorkspaceSync(config, context);
   worker = context.worker;
 
-  if (worker.herdrVersion !== HERDR_VERSION) {
+  const responsive = responsiveHerdrRequested();
+  if (responsive) {
+    // The mirror runtime is deliberately stacked beside the official stable
+    // runtime. Never replace the user's proven 0.8.2 desk while dogfooding.
+    ensureHerdrInstalled(worker, { quiet: false });
+    if (worker.herdrVersion !== HERDR_VERSION) {
+      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
+    }
+    context = { ...context, worker };
+    ensureResponsiveHerdrInstalled(worker, { quiet: false });
+  } else if (worker.herdrVersion !== HERDR_VERSION) {
     ensureHerdrInstalled(worker, { quiet: false });
     worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
     context = { ...context, worker };
   }
-  const runtime = herdrRuntimeName(config.controllerId, context.name);
+  const stableRuntime = herdrRuntimeName(config.controllerId, context.name);
+  const runtime = responsive ? responsiveRuntimeName(stableRuntime) : stableRuntime;
+  // Internal runtime overrides must never enter persisted worker metadata.
+  // `worker` remains the real machine; `deskWorker` is an ephemeral Herdr view.
+  let deskWorker = responsive ? responsiveHerdrWorker(worker) : worker;
   // The Herdr config, the pane shell shim, and shell.ps1 ship with Handoff, not
   // with the pinned binary. Gating them on the install left every worker that
   // already had Herdr on the old files, so its panes started a bare shell: no
   // statusline, no Alt+Backspace.
-  ensureHerdrConfig(worker);
+  ensureHerdrConfig(deskWorker);
 
   // The desk probe has to happen anyway, so it carries the managed-file check.
   const roots = targetWorkspace(context).roots;
-  const probe = probeHerdrDesk(worker, runtime, managedGuard(context, roots));
+  const probe = probeHerdrDesk(deskWorker, runtime, managedGuard(context, roots));
   if (probe.repairNeeded) {
     worker = repairManagedAssets(config, context, roots);
     context = { ...context, worker };
+    deskWorker = responsive ? responsiveHerdrWorker(worker) : worker;
   }
   // A cached herdrVersion is only a claim about the worker. The probe is the
   // fact, so a binary that went missing gets put back before the desk starts.
   if (!probe.installed) {
-    ensureHerdrInstalled(worker, { quiet: false });
-    worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
-    context = { ...context, worker };
+    if (responsive) {
+      ensureResponsiveHerdrInstalled(worker, { quiet: false });
+    } else {
+      ensureHerdrInstalled(worker, { quiet: false });
+      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });
+      context = { ...context, worker };
+    }
+    deskWorker = responsive ? responsiveHerdrWorker(worker) : worker;
   }
+  if (probe.repairNeeded || !probe.installed) ensureHerdrConfig(deskWorker);
   const workspace = targetWorkspace(context);
   const agentDirectories = handoffAgentDirectories(workspace);
   if (!probe.running) {
-    ensureHerdrServer(worker, runtime, {
+    ensureHerdrServer(deskWorker, runtime, {
       agentDirectories,
       claudeSettings: ".hn/claude-settings.json",
     });
@@ -609,14 +636,14 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
 
   // Project-scoped, not cwd-scoped. An existing desk keeps the directory it has.
   const remoteRoot = mapLocalToRemote(context.root, context.projectLocal);
-  const project = ensureHerdrProject(worker, runtime, {
+  const project = ensureHerdrProject(deskWorker, runtime, {
     remoteRoot,
     name: basename(context.projectLocal),
   });
   if (project.created) {
     console.log(`desk ready. click a project or agent in the sidebar; 'hn ${targetName} -p' comes back here`);
   }
-  bootstrapHerdrProjectPane(worker, runtime, project.workspaceId, {
+  bootstrapHerdrProjectPane(deskWorker, runtime, project.workspaceId, {
     agentDirectories,
     claudeSettings: ".hn/claude-settings.json",
   });
@@ -627,9 +654,9 @@ function runPersistentDesk(config, targetName, commandArgs = []) {
       remoteRoot,
       { claudeSettings: handoffClaudeSettingsArgument() },
     );
-    runInHerdrProject(worker, runtime, project.workspaceId, remoteArgs);
+    runInHerdrProject(deskWorker, runtime, project.workspaceId, remoteArgs);
   }
-  const attached = attachHerdr(worker, runtime);
+  const attached = attachHerdr(deskWorker, runtime);
   if (attached.desk === "detached") {
     console.log(`desk still running on ${targetName}. 'hn ${targetName} -p' comes back to it`);
   }

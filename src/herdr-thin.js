@@ -100,7 +100,7 @@ function sleepMs(ms) {
 
 export function thinTransportMode(env = process.env) {
   const value = String(env.HN_HERDR_TRANSPORT ?? "auto").trim().toLowerCase();
-  if (["auto", "thin", "legacy"].includes(value)) return value;
+  if (["auto", "mirror", "thin", "legacy"].includes(value)) return value;
   return "auto";
 }
 

@@ -142,10 +142,10 @@ test("closing an attachment to a healthy desk is not a failure", () => {
 test("starting the desk refreshes Handoff's own Herdr files, not just the binary", () => {
   const source = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
   const desk = source.slice(source.indexOf("function runPersistentDesk"), source.indexOf("function managedExpectationFor"));
-  assert.match(desk, /ensureHerdrConfig\(worker\);/);
+  assert.match(desk, /ensureHerdrConfig\(deskWorker\);/);
   assert.ok(
-    desk.indexOf("ensureHerdrConfig(worker);") < desk.indexOf("probeHerdrDesk("),
-    "the config has to be current before the desk server is probed or started",
+    desk.indexOf("ensureHerdrConfig(deskWorker);") < desk.indexOf("probeHerdrDesk("),
+    "the runtime-specific config has to be current before the desk server is probed or started",
   );
 });
 

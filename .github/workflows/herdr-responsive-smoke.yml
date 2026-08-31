@@ -1,0 +1,130 @@
+name: Responsive Herdr Windows smoke
+
+on:
+  push:
+    branches:
+      - feat/herdr-responsive-data-plane
+    paths:
+      - .github/workflows/herdr-responsive-smoke.yml
+  pull_request:
+    paths:
+      - src/herdr-responsive.js
+      - src/herdr.js
+      - src/herdr-thin.js
+      - src/index.js
+      - test/herdr-responsive.test.js
+      - .github/workflows/herdr-responsive-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HERDR_MIRROR_REF: 20a0cd5294fb15ef17209612d80d5a2704169990
+  HERDR_MIRROR_TAG: herdr-mirror-20a0cd5294fb15ef17209612d80d5a2704169990
+  HERDR_MIRROR_WINDOWS_SHA256: 3e6fd237375940724c2085adb477f76b5f6d1d42f204913055dda025bd4863a9
+  HERDR_STABLE_WINDOWS_SHA256: 0ab3d0fe1434d55757997542b978c771d642987bb15a7130f4160f0db38821d5
+
+jobs:
+  windows-runtime:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify pinned runtimes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $mirror = Join-Path $env:RUNNER_TEMP 'herdr-mirror.exe'
+          $stable = Join-Path $env:RUNNER_TEMP 'herdr-stable.zip'
+          $mirrorUrl = "https://github.com/Bbrizly/Handoff/releases/download/$env:HERDR_MIRROR_TAG/herdr-mirror-windows-x86_64.exe"
+          $stableUrl = 'https://github.com/herdrdev/herdr/releases/download/v0.8.2/herdr-windows-x86_64.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri $mirrorUrl -OutFile $mirror
+          Invoke-WebRequest -UseBasicParsing -Uri $stableUrl -OutFile $stable
+          $mirrorHash = (Get-FileHash -Algorithm SHA256 $mirror).Hash.ToLowerInvariant()
+          $stableHash = (Get-FileHash -Algorithm SHA256 $stable).Hash.ToLowerInvariant()
+          if ($mirrorHash -ne $env:HERDR_MIRROR_WINDOWS_SHA256) { throw "responsive Herdr checksum mismatch: $mirrorHash" }
+          if ($stableHash -ne $env:HERDR_STABLE_WINDOWS_SHA256) { throw "official Herdr bundle checksum mismatch: $stableHash" }
+
+      - name: Assemble the exact Handoff Windows runtime layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path $env:RUNNER_TEMP 'herdr-mirror-bundle'
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Expand-Archive -LiteralPath (Join-Path $env:RUNNER_TEMP 'herdr-stable.zip') -DestinationPath $bundle -Force
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'herdr-mirror.exe') -Destination (Join-Path $bundle 'herdr.exe') -Force
+          $version = (& (Join-Path $bundle 'herdr.exe') --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '0\.7\.4') { throw "unexpected responsive Herdr version: $version" }
+
+      - name: Start server, create a PTY pane, run and read output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path $env:RUNNER_TEMP 'herdr-mirror-bundle'
+          $exe = Join-Path $bundle 'herdr.exe'
+          $config = Join-Path $env:RUNNER_TEMP 'herdr-mirror-smoke.toml'
+          Set-Content -LiteralPath $config -Encoding utf8 -Value @(
+            'onboarding = false',
+            '[update]',
+            'version_check = false',
+            'manifest_check = false',
+            '[terminal]',
+            'default_shell = "powershell.exe"'
+          )
+          $env:HERDR_CONFIG_PATH = $config
+          $env:XDG_CONFIG_HOME = Join-Path $env:RUNNER_TEMP 'hn-xdg-config'
+          $env:XDG_STATE_HOME = Join-Path $env:RUNNER_TEMP 'hn-xdg-state'
+          $env:XDG_CACHE_HOME = Join-Path $env:RUNNER_TEMP 'hn-xdg-cache'
+          $session = "hn-ci-$env:GITHUB_RUN_ID"
+          $server = Start-Process -FilePath $exe -ArgumentList @('--session', $session, 'server') -PassThru -WindowStyle Hidden
+          try {
+            $running = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              $status = (& $exe --session $session status server --json 2>$null | Out-String).Trim()
+              if ($LASTEXITCODE -eq 0 -and $status -match '"running":true') { $running = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $running) { throw 'responsive Herdr server did not become ready' }
+
+            $createdRaw = (& $exe --session $session workspace create --cwd $env:RUNNER_TEMP --label smoke --focus | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "workspace create failed: $createdRaw" }
+            $created = $createdRaw | ConvertFrom-Json
+            $workspaceId = [string]$created.result.workspace.workspace_id
+            if ([string]::IsNullOrWhiteSpace($workspaceId)) { throw "workspace id missing: $createdRaw" }
+
+            $panesRaw = (& $exe --session $session pane list --workspace $workspaceId | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "pane list failed: $panesRaw" }
+            $panes = $panesRaw | ConvertFrom-Json
+            $paneId = [string]$panes.result.panes[0].pane_id
+            if ([string]::IsNullOrWhiteSpace($paneId)) { throw "pane id missing: $panesRaw" }
+
+            # Workspace creation can return before ConPTY has finished launching
+            # PowerShell. `pane run` is input injection, so firing it before the
+            # shell owns the PTY is a real race. Prove shell readiness first.
+            $paneReady = $false
+            $processInfo = ''
+            for ($i = 0; $i -lt 80; $i++) {
+              $processInfo = (& $exe --session $session pane process-info --pane $paneId 2>$null | Out-String).Trim()
+              if ($LASTEXITCODE -eq 0 -and $processInfo -match '(?i)powershell(?:\.exe)?') { $paneReady = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $paneReady) { throw "PowerShell pane did not become ready. process-info: $processInfo" }
+            Start-Sleep -Milliseconds 500
+
+            & $exe --session $session pane run $paneId 'Write-Output HN_MIRROR_SMOKE' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'pane run failed' }
+            $seen = $false
+            $read = ''
+            for ($i = 0; $i -lt 80; $i++) {
+              $read = (& $exe --session $session pane read $paneId --lines 80 | Out-String)
+              if ($read -match 'HN_MIRROR_SMOKE') { $seen = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $seen) {
+              $processInfo = (& $exe --session $session pane process-info --pane $paneId 2>$null | Out-String).Trim()
+              throw "ConPTY smoke output never appeared. process-info: $processInfo; pane: $read"
+            }
+          } finally {
+            & $exe --session $session server stop *> $null
+            if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+          }
