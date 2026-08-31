@@ -154,3 +154,10 @@ test("persistent desk keeps runtime-only Herdr overrides out of worker metadata"
   assert.doesNotMatch(desk, /persistWorkerMetadata\([^\n]*__hnHerdr/);
   assert.doesNotMatch(desk, /context = \{ \.\.\.context, worker: deskWorker \}/);
 });
+
+test("responsive port retries cannot inherit stale readiness markers", () => {
+  const source = readFileSync(new URL("../src/herdr-responsive.js", import.meta.url), "utf8");
+  assert.match(source, /forward-\$\{label\}-\$\{attempt\}\.log/);
+  assert.match(source, /openSync\(logPath, "w\+"\)/);
+  assert.doesNotMatch(source, /openSync\(logPath, "a\+"\)/);
+});

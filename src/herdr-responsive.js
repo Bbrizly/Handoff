@@ -335,8 +335,8 @@ function startPipeForward(worker, pipePath, socketPath, dir, label) {
   for (let attempt = 0; attempt < PORT_ATTEMPTS; attempt += 1) {
     const port = ephemeralLoopbackPort();
     const remoteScript = stageBridgeScript(worker, pipePath, port);
-    const logPath = join(dir, `forward-${label}.log`);
-    const log = openSync(logPath, "a+");
+    const logPath = join(dir, `forward-${label}-${attempt}.log`);
+    const log = openSync(logPath, "w+");
     let child;
     try {
       child = spawn("ssh", thinForwardArgs(worker, socketPath, port, windowsPipeBridgeArgs(remoteScript)), {
