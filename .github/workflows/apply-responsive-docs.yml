@@ -1,0 +1,90 @@
+name: Reconcile responsive architecture docs
+
+on:
+  push:
+    branches:
+      - feat/herdr-responsive-data-plane
+    paths:
+      - .github/workflows/apply-responsive-docs.yml
+
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: feat/herdr-responsive-data-plane
+
+      - name: Update canonical architecture records
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          decisions = Path("docs/DECISIONS.md")
+          d = decisions.read_text()
+          if "## HN-078" not in d:
+              d = d.rstrip() + '''\n\n---\n\n## HN-078 — A responsive local terminal data plane is provisional and isolated from the stable desk\n\n**Status:** Provisional; code/CI complete, human latency and interaction gate still open\n\nHN-077 fixed the correctness failure in the official Herdr v0.8.2 thin transport: protocol bytes now travel over SSH forwarding rather than a Windows exec channel. Real hardware proved typing, resize, detach, and server persistence through that path. It did **not** remove the architectural cost that the official server still owns terminal rendering/state and sends rendered updates back across the network.\n\nThe selected experiment is a true local terminal mirror, not another byte pump. Handoff pins exactly `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990` (Herdr 0.7.4 / protocol 17), whose mirror mode keeps process/session/PTY authority on the worker while replicating raw terminal output and resize events to a controller-local terminal emulator with local scrollback/search/selection. Handoff forwards both the control `herdr.sock` and data `herdr-client.sock` sockets through its existing SSH policy.\n\nBecause this runtime is protocol-incompatible with the official v0.8.2 desk and declares AGPL-3.0-or-later, it is deliberately isolated:\n\n- entered only by `HN_HERDR_TRANSPORT=mirror`;\n- separate binary, config, local client state, and `-mirror-20a0cd5` session name;\n- no fallback across the protocol boundary;\n- runtime-only path overrides are ephemeral and never persisted in worker metadata;\n- exact checksum-pinned binaries, Corresponding Source, and upstream license are published together;\n- the official v0.8.2 desk remains installed and untouched.\n\nCI proves the pinned Windows executable can run beside the official v0.8.2 Windows bundle components, start a server, create a real ConPTY pane, run a command, read its output, and stop cleanly. That is a mechanical gate, not the product gate.\n\nThis decision becomes Accepted only if the reference Mac → Lenovo A/B dogfood proves materially better typing/resize/mouse/scrollback feel while preserving Option+Backspace, Claude parity, detach/reattach, controller-close persistence, and the original official server PID. If it does not, the experiment stays explicit and the stable official thin path remains the product default.\n'''
+              decisions.write_text(d)
+
+          replace_once(
+              "docs/ARCHITECTURE.md",
+              '''Attaching does not use Herdr's own `--remote` client, which does not support Windows remote hosts. Handoff already owns SSH, so it runs a Herdr client on the worker through its own PTY.\n\nEnding an attachment is not a failure.''',
+              '''The default Windows attachment does not use Herdr's own `--remote` launcher, which does not support Windows remote hosts. Handoff runs the pinned official v0.8.2 Herdr client on the controller. A private local Unix socket is published through SSH direct-tcpip forwarding to a one-attachment, loopback-only helper on Windows, which copies bytes to the already-running server's `herdr-client.sock` named pipe. Herdr protocol bytes never ride an SSH exec channel. The helper has no server lifecycle authority. See HN-077.\n\n`HN_HERDR_TRANSPORT=legacy` keeps the older worker-side PTY attachment as an explicit fallback/debug path. Normal `auto` prefers the official local thin client where supported.\n\nEnding an attachment is not a failure.''',
+          )
+
+          replace_once(
+              "docs/ARCHITECTURE.md",
+              '''The dependency is enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; the persistence runtime installs only when a persistent command asks for it. `hn doctor` reports a missing runtime as `— persistence`, not a failure.\n\n## 13. Port forwarding architecture''',
+              '''The dependency is enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; the persistence runtime installs only when a persistent command asks for it. `hn doctor` reports a missing runtime as `— persistence`, not a failure.\n\n### 12.3 Provisional responsive mirror data plane\n\nThe explicit `HN_HERDR_TRANSPORT=mirror` dogfood path tests a different terminal boundary. It uses a separately pinned Herdr 0.7.4 / protocol 17 runtime built from `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990`; it never attaches that client to the official v0.8.2 server.\n\n```text\nMac terminal\n  -> responsive Herdr --mirror (local emulator + scrollback)\n  -> private herdr.sock + herdr-client.sock forwards\n  -> Handoff SSH policy\n  -> loopback-only Windows pipe bridges\n  -> separate responsive Herdr server\n  -> Windows PTYs / workloads\n```\n\nThe worker remains authoritative for process, session, and PTY lifetime. The controller-local mirror owns terminal interpretation, scrollback, search, selection, keyboard/mouse handling, and resize rendering. The responsive runtime has separate install/config/client-state directories and a distinct session name, so dogfood cannot stop, replace, or silently migrate the official desk. See HN-078.\n\nThis path is **not** part of the default product contract until the reference hardware human interaction/latency gate passes.\n\n## 13. Port forwarding architecture''',
+          )
+
+          replace_once(
+              "docs/ARCHITECTURE.md",
+              '''### Herdr\n\n- version: 0.8.2;\n- worker-managed by Handoff;\n- official GitHub release;\n- SHA-256 verified on the controller;\n- installed on first `-p`, never before.\n\nThis reduces setup drift and makes Handoff's infrastructure behavior reproducible.''',
+              '''### Herdr\n\nDefault persistence/runtime:\n\n- version: official Herdr 0.8.2 / protocol 20;\n- worker server plus controller-local thin client where supported;\n- official GitHub release;\n- SHA-256 verified on the controller;\n- installed on first `-p`, never before.\n\nExplicit responsive dogfood only:\n\n- exact source: `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990`;\n- Herdr 0.7.4 / protocol 17;\n- separately checksummed controller/Windows binaries and Corresponding Source;\n- separate install/config/state/session namespace;\n- never selected by `auto`.\n\nThis reduces setup drift and makes Handoff's infrastructure behavior reproducible without turning an experimental protocol boundary into the default.''',
+          )
+
+          known = Path("docs/KNOWN_ISSUES.md")
+          k = known.read_text()
+          if "## 26. The correct thin transport still leaves server-rendering latency" not in k:
+              k = k.rstrip() + '''\n\n---\n\n## 26. The correct thin transport still leaves server-rendering latency\n\n**Severity:** High UX if perceptible in daily use  \n**Status:** Provisional mitigation implemented; human A/B gate open\n\nHN-077 fixed the Windows input boundary. The official v0.8.2 client now types correctly over SSH direct-tcpip, survives controller disconnects without killing the worker desk, and keeps the same server PID. That does not mean the terminal feels local: the official server still owns terminal state/rendering and sends screen updates across the network.\n\nPR #21 adds an explicit `HN_HERDR_TRANSPORT=mirror` experiment using the separately pinned `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990` mirror runtime. Its local client keeps a terminal emulator and scrollback on the Mac while the separate Windows server continues owning PTYs/processes. Control and raw terminal data use two forwarded sockets. The official v0.8.2 desk is not replaced.\n\nMechanical evidence is green: exact checksums, macOS arm64/x64 and Windows builds, Corresponding Source publication, repository tests, Runtime Integration, and a Windows CI smoke that starts the custom server from Handoff's Windows runtime layout, creates a ConPTY pane, runs a command, and reads the output back.\n\nStill unproven and therefore not claimable:\n\n- materially lower perceived typing latency than stable thin/legacy;\n- Option+Backspace in a real Zed terminal and inside Claude;\n- mouse/sidebar and rapid resize feel;\n- local scrollback/search/selection feel;\n- Claude statusline/workspace parity;\n- detach/reattach and controller-terminal-close persistence on the reference Lenovo;\n- the official v0.8.2 server PID remaining unchanged through mirror dogfood.\n\nThe exact A/B procedure and rollback are in `RESPONSIVE_HERDR_DOGFOOD.md`. Do not make mirror the default until those checks pass.\n'''
+              known.write_text(k)
+
+          replace_once(
+              "docs/ROADMAP.md",
+              '''- attaching renders the desk over Handoff's own SSH PTY, with mouse tracking and Handoff's window title.''',
+              '''- the official local thin client now renders the Windows desk on the controller through Handoff's SSH direct-tcpip bridge; the legacy worker-side SSH PTY remains an explicit fallback.''',
+          )
+
+          replace_once(
+              "docs/ROADMAP.md",
+              '''Remaining:\n\n- a human in the loop: click through the sidebar, close the terminal for an hour, come back;''',
+              '''Remaining:\n\n- **responsive mirror A/B gate (HN-078):** explicit `HN_HERDR_TRANSPORT=mirror` is mechanically green and isolated, but it must prove materially more local-feeling typing/resize/mouse/scrollback on the reference Mac → Lenovo path before it can replace the official thin default;\n- a human in the loop: click through the sidebar, close the terminal for an hour, come back;''',
+          )
+          PY
+
+      - name: Verify repository after doc reconciliation
+        run: |
+          npm test
+          npm run check
+          git diff --check
+
+      - name: Commit canonical docs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/DECISIONS.md docs/ARCHITECTURE.md docs/KNOWN_ISSUES.md docs/ROADMAP.md
+          git diff --cached --check
+          git commit -m "docs: record responsive terminal data plane"
+          git push origin HEAD:feat/herdr-responsive-data-plane
