@@ -462,7 +462,9 @@ The desk is named `hn-<controller-id-short>-<workspace>`, so two controllers sha
 
 Herdr runs under a Handoff-owned config at `~/.hn/herdr/config.toml`, selected with `HERDR_CONFIG_PATH`. The user's own `~/.config/herdr/config.toml` is never touched. Handoff turns off onboarding and update checks, sorts the sidebar by attention, and drops the branch/git rows because the synchronized tree has no `.git`.
 
-Attaching does not use Herdr's own `--remote` client, which does not support Windows remote hosts. Handoff already owns SSH, so it runs a Herdr client on the worker through its own PTY.
+The default Windows attachment does not use Herdr's own `--remote` launcher, which does not support Windows remote hosts. Handoff runs the pinned official v0.8.2 Herdr client on the controller. A private local Unix socket is published through SSH direct-tcpip forwarding to a one-attachment, loopback-only helper on Windows, which copies bytes to the already-running server's `herdr-client.sock` named pipe. Herdr protocol bytes never ride an SSH exec channel. The helper has no server lifecycle authority. See HN-077.
+
+`HN_HERDR_TRANSPORT=legacy` keeps the older worker-side PTY attachment as an explicit fallback/debug path. Normal `auto` prefers the official local thin client where supported.
 
 Ending an attachment is not a failure. A non-zero attach asks the desk directly (`herdr status server`); a running server means the user detached, and a silent one means a real fault. See HN-071.
 
@@ -471,6 +473,24 @@ One probe covers the whole `-p` preflight: whether the desk is up, whether the H
 tmux, Zellij, and mandatory WSL remain rejected. Core Handoff does not depend on any session manager. See HN-076.
 
 The dependency is enforced by the bootstrap split rather than by convention. `prepareWorkerCore()` proves SSH and detects the platform; the persistence runtime installs only when a persistent command asks for it. `hn doctor` reports a missing runtime as `— persistence`, not a failure.
+
+### 12.3 Provisional responsive mirror data plane
+
+The explicit `HN_HERDR_TRANSPORT=mirror` dogfood path tests a different terminal boundary. It uses a separately pinned Herdr 0.7.4 / protocol 17 runtime built from `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990`; it never attaches that client to the official v0.8.2 server.
+
+```text
+Mac terminal
+  -> responsive Herdr --mirror (local emulator + scrollback)
+  -> private herdr.sock + herdr-client.sock forwards
+  -> Handoff SSH policy
+  -> loopback-only Windows pipe bridges
+  -> separate responsive Herdr server
+  -> Windows PTYs / workloads
+```
+
+The worker remains authoritative for process, session, and PTY lifetime. The controller-local mirror owns terminal interpretation, scrollback, search, selection, keyboard/mouse handling, and resize rendering. The responsive runtime has separate install/config/client-state directories and a distinct session name, so dogfood cannot stop, replace, or silently migrate the official desk. See HN-078.
+
+This path is **not** part of the default product contract until the reference hardware human interaction/latency gate passes.
 
 ## 13. Port forwarding architecture
 
@@ -535,13 +555,23 @@ hn worker default pc
 
 ### Herdr
 
-- version: 0.8.2;
-- worker-managed by Handoff;
+Default persistence/runtime:
+
+- version: official Herdr 0.8.2 / protocol 20;
+- worker server plus controller-local thin client where supported;
 - official GitHub release;
 - SHA-256 verified on the controller;
 - installed on first `-p`, never before.
 
-This reduces setup drift and makes Handoff's infrastructure behavior reproducible.
+Explicit responsive dogfood only:
+
+- exact source: `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990`;
+- Herdr 0.7.4 / protocol 17;
+- separately checksummed controller/Windows binaries and Corresponding Source;
+- separate install/config/state/session namespace;
+- never selected by `auto`.
+
+This reduces setup drift and makes Handoff's infrastructure behavior reproducible without turning an experimental protocol boundary into the default.
 
 ## 17. Security boundaries
 

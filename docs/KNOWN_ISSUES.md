@@ -648,3 +648,28 @@ stale and answered `mux_client_request_session: session request failed: Session 
 refused by peer` while still reporting `Master running`. Every command over it, and
 every `-L` through it, failed until it was removed. The thin attach now opens its own
 connection, so it is immune, but ordinary `hn` commands are not.
+
+---
+
+## 26. The correct thin transport still leaves server-rendering latency
+
+**Severity:** High UX if perceptible in daily use
+**Status:** Provisional mitigation implemented; human A/B gate open
+
+HN-077 fixed the Windows input boundary. The official v0.8.2 client now types correctly over SSH direct-tcpip, survives controller disconnects without killing the worker desk, and keeps the same server PID. That does not mean the terminal feels local: the official server still owns terminal state/rendering and sends screen updates across the network.
+
+PR #21 adds an explicit `HN_HERDR_TRANSPORT=mirror` experiment using the separately pinned `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990` mirror runtime. Its local client keeps a terminal emulator and scrollback on the Mac while the separate Windows server continues owning PTYs/processes. Control and raw terminal data use two forwarded sockets. The official v0.8.2 desk is not replaced.
+
+Mechanical evidence is green: exact checksums, macOS arm64/x64 and Windows builds, Corresponding Source publication, repository tests, Runtime Integration, and a Windows CI smoke that starts the custom server from Handoff's Windows runtime layout, creates a ConPTY pane, runs a command, and reads the output back.
+
+Still unproven and therefore not claimable:
+
+- materially lower perceived typing latency than stable thin/legacy;
+- Option+Backspace in a real Zed terminal and inside Claude;
+- mouse/sidebar and rapid resize feel;
+- local scrollback/search/selection feel;
+- Claude statusline/workspace parity;
+- detach/reattach and controller-terminal-close persistence on the reference Lenovo;
+- the official v0.8.2 server PID remaining unchanged through mirror dogfood.
+
+The exact A/B procedure and rollback are in `RESPONSIVE_HERDR_DOGFOOD.md`. Do not make mirror the default until those checks pass.

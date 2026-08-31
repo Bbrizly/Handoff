@@ -1137,3 +1137,26 @@ depend on.
 Rejected: repairing exec stdin, a ConPTY for protocol bytes, a Node byte relay
 between the renderer and ssh (`ssh -L` already publishes the socket, so the relay
 was deleted), and any listener not bound to loopback.
+
+---
+
+## HN-078 — A responsive local terminal data plane is provisional and isolated from the stable desk
+
+**Status:** Provisional; code/CI complete, human latency and interaction gate still open
+
+HN-077 fixed the correctness failure in the official Herdr v0.8.2 thin transport: protocol bytes now travel over SSH forwarding rather than a Windows exec channel. Real hardware proved typing, resize, detach, and server persistence through that path. It did **not** remove the architectural cost that the official server still owns terminal rendering/state and sends rendered updates back across the network.
+
+The selected experiment is a true local terminal mirror, not another byte pump. Handoff pins exactly `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990` (Herdr 0.7.4 / protocol 17), whose mirror mode keeps process/session/PTY authority on the worker while replicating raw terminal output and resize events to a controller-local terminal emulator with local scrollback/search/selection. Handoff forwards both the control `herdr.sock` and data `herdr-client.sock` sockets through its existing SSH policy.
+
+Because this runtime is protocol-incompatible with the official v0.8.2 desk and declares AGPL-3.0-or-later, it is deliberately isolated:
+
+- entered only by `HN_HERDR_TRANSPORT=mirror`;
+- separate binary, config, local client state, and `-mirror-20a0cd5` session name;
+- no fallback across the protocol boundary;
+- runtime-only path overrides are ephemeral and never persisted in worker metadata;
+- exact checksum-pinned binaries, Corresponding Source, and upstream license are published together;
+- the official v0.8.2 desk remains installed and untouched.
+
+CI proves the pinned Windows executable can run beside the official v0.8.2 Windows bundle components, start a server, create a real ConPTY pane, run a command, read its output, and stop cleanly. That is a mechanical gate, not the product gate.
+
+This decision becomes Accepted only if the reference Mac → Lenovo A/B dogfood proves materially better typing/resize/mouse/scrollback feel while preserving Option+Backspace, Claude parity, detach/reattach, controller-close persistence, and the original official server PID. If it does not, the experiment stays explicit and the stable official thin path remains the product default.
