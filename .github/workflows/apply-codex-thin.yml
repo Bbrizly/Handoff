@@ -1,0 +1,109 @@
+name: Apply Codex thin-client integration
+
+on:
+  push:
+    branches:
+      - feat/codex-thin-client
+    paths:
+      - .github/workflows/apply-codex-thin.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/codex-thin-client
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Wire CLI and canonical docs
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/index.js",
+              'import { additionalWorkspaceDirs, augmentAgentCommand, isClaudeWorkCommand } from "./agent.js";\n',
+              'import { additionalWorkspaceDirs, augmentAgentCommand, isClaudeWorkCommand } from "./agent.js";\n'
+              'import {\n'
+              '  codexAppServerStatus,\n'
+              '  codexRemoteCompatibility,\n'
+              '  runCodexRemoteTui,\n'
+              '  shouldUseCodexRemoteTui,\n'
+              '  stopCodexAppServer,\n'
+              '} from "./codex-remote.js";\n',
+          )
+
+          replace_once(
+              "src/index.js",
+              '  "port", "exec", "shell", "on", "use", "profile", "access",\n',
+              '  "port", "exec", "shell", "on", "use", "profile", "access", "codex-server",\n',
+          )
+
+          replace_once(
+              "src/index.js",
+              '  hn claude                  direct interactive Claude on the selected target\n'
+              '  hn shell                   open the selected target\'s mapped remote shell\n',
+              '  hn claude                  direct interactive Claude on the selected target\n'
+              '  hn codex                   local Codex TUI + remote worker agent runtime when supported\n'
+              '  hn codex-server status     inspect the persistent worker Codex backend\n'
+              '  hn shell                   open the selected target\'s mapped remote shell\n',
+          )
+
+          marker = '''function runInteractive(config, targetName, commandArgs = [], { preparedWorker = null } = {}) {\n'''
+          insert = '''async function runCodex(config, targetName, args = [], { preparedWorker = null } = {}) {\n  const mode = String(process.env.HN_CODEX_TRANSPORT ?? "auto").trim().toLowerCase();\n  if (!["auto", "app-server", "legacy"].includes(mode)) {\n    fail("HN_CODEX_TRANSPORT must be auto, app-server, or legacy.");\n  }\n\n  const worker = preparedWorker ?? prepareTarget(config, targetName);\n  if (mode === "legacy" || !shouldUseCodexRemoteTui(args)) {\n    runInteractive(config, targetName, ["codex", ...args], { preparedWorker: worker });\n    return;\n  }\n\n  const compatibility = codexRemoteCompatibility(worker);\n  if (!compatibility.ok) {\n    if (mode === "app-server") fail(`Codex thin client unavailable: ${compatibility.reason}`);\n    console.warn(`hn: Codex thin client unavailable (${compatibility.reason}); using the worker terminal instead.`);\n    runInteractive(config, targetName, ["codex", ...args], { preparedWorker: worker });\n    return;\n  }\n\n  let context = findContext(config, process.cwd());\n  context = { ...context, targetName, worker };\n  ensureWorkspaceSync(config, context);\n  const remoteCwd = mapLocalToRemote(context.root, process.cwd());\n  const result = await runCodexRemoteTui(worker, {\n    controllerId: config.controllerId,\n    targetName,\n    remoteCwd,\n    args,\n    compatibility,\n  });\n  if (result.code) process.exitCode = result.code;\n}\n\nfunction runInteractive(config, targetName, commandArgs = [], { preparedWorker = null } = {}) {\n'''
+          replace_once("src/index.js", marker, insert)
+
+          replace_once(
+              "src/index.js",
+              '''  if (targetInvocation) {\n    if (targetInvocation.mode === "persistent") {\n      runPersistentDesk(config, targetInvocation.targetName, targetInvocation.commandArgs);\n    } else {\n      runInteractive(config, targetInvocation.targetName, targetInvocation.commandArgs);\n    }\n    return;\n''',
+              '''  if (targetInvocation) {\n    if (targetInvocation.mode === "persistent") {\n      runPersistentDesk(config, targetInvocation.targetName, targetInvocation.commandArgs);\n    } else if (String(targetInvocation.commandArgs[0] ?? "").toLowerCase() === "codex") {\n      await runCodex(config, targetInvocation.targetName, targetInvocation.commandArgs.slice(1));\n    } else {\n      runInteractive(config, targetInvocation.targetName, targetInvocation.commandArgs);\n    }\n    return;\n''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '''  if (command === "use") {\n''',
+              '''  if (command === "codex") {\n    await runCodex(config, targetFor(config).name, args);\n    return;\n  }\n\n  if (command === "codex-server") {\n    const sub = String(args[0] ?? "status").toLowerCase();\n    if (!["status", "stop"].includes(sub)) fail("Usage: hn codex-server <status|stop>");\n    const target = targetFor(config);\n    const worker = prepareTarget(config, target.name);\n    if (worker.platform !== "windows") fail("Codex app-server management currently requires a Windows worker.");\n    if (sub === "stop") {\n      const stopped = stopCodexAppServer(worker, { controllerId: config.controllerId, targetName: target.name });\n      console.log(stopped ? `stopped Codex app-server on ${target.name}` : `no Handoff Codex app-server is recorded on ${target.name}`);\n      return;\n    }\n    const state = codexAppServerStatus(worker, { controllerId: config.controllerId, targetName: target.name });\n    if (!state.ready) {\n      console.log(`codex      —  no healthy Handoff app-server on ${target.name}`);\n      return;\n    }\n    console.log(`codex      ✓  ${target.name}  pid ${state.pid}  127.0.0.1:${state.port}  ${state.version}`);\n    return;\n  }\n\n  if (command === "use") {\n''',
+          )
+
+          readme = Path("README.md")
+          r = readme.read_text()
+          if "HN_CODEX_TRANSPORT=app-server" not in r:
+              r = r.rstrip() + '''\n\n### Codex thin client (dogfood)\n\nCurrent Codex supports a remote TUI that connects to `codex app-server`. Handoff can use that boundary so the controller renders the stock Codex TUI locally while the selected Windows worker owns the stateful agent runtime, project cwd, tools, and execution. The app-server binds only `127.0.0.1`; Handoff reaches it through a disposable SSH local forward.\n\n```bash\nHN_CODEX_TRANSPORT=app-server hn codex\n```\n\n`auto` is the default and prefers this path when both controller and worker expose the required Codex features at the same version; otherwise it falls back to the existing remote-terminal behavior. `HN_CODEX_TRANSPORT=legacy` forces the old path. Management commands such as `hn codex login`, `mcp`, `update`, and `exec` remain worker-side.\n\nInspect or stop the persistent worker backend with `hn codex-server status` and `hn codex-server stop`.\n'''
+              readme.write_text(r)
+
+          decisions = Path("docs/DECISIONS.md")
+          d = decisions.read_text()
+          if "## HN-079" not in d:
+              d = d.rstrip() + '''\n\n---\n\n## HN-079 — Codex uses its native remote app-server boundary instead of terminal remoting\n\n**Status:** Provisional; implementation/CI may prove mechanics, reference-hardware resource/UX gate remains\n\nFor interactive Codex, the desired boundary is not a remote terminal. Current Codex exposes a stock remote TUI (`codex --remote`) backed by `codex app-server`. Handoff therefore keeps the human-facing TUI on the controller and the stateful Codex backend on the worker. The worker app-server owns agent/thread state, project cwd, tools, and execution; the controller owns keyboard handling and rendering.\n\nHandoff starts one detached, localhost-only app-server per controller+target, records the exact worker PID/port/version under `~/.hn/state`, verifies `/readyz` and the recorded process command line before reuse, and uses a dedicated SSH local forward for each attached TUI. The tunnel has no shared ControlMaster lifecycle and disappears when the local TUI exits. The app-server survives controller/TUI loss.\n\nThe path requires controller/worker Codex versions to match exactly and uses a conservative tested floor of 0.150.1 because older remote-TUI builds had remote-only `--cd` validation bugs. `auto` falls back to legacy terminal remoting before local TUI launch if prerequisites fail; `app-server` fails closed; `legacy` preserves existing behavior. Codex management/noninteractive commands stay worker-side.\n\nHerdr is not in the Codex protocol data path. It may later surface/manage backend agents, but terminal rendering or PTY mirroring is not required for Codex when its native client/server protocol is available.\n'''
+              decisions.write_text(d)
+          PY
+
+      - name: Verify integration
+        run: |
+          npm test
+          npm run check
+          git diff --check
+
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/index.js README.md docs/DECISIONS.md
+          git diff --cached --check
+          git commit -m "feat: route Codex through remote app-server"
+          git push origin HEAD:feat/codex-thin-client
