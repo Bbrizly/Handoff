@@ -1,11 +1,6 @@
 name: Build responsive Herdr runtime
 
 on:
-  push:
-    branches:
-      - feat/herdr-responsive-data-plane
-    paths:
-      - .github/workflows/herdr-responsive-runtime.yml
   workflow_dispatch:
 
 permissions:
