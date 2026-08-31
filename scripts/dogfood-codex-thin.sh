@@ -22,13 +22,14 @@ printf 'project:  %s\n' "$PROJECT_CWD"
 printf 'source:   %s\n' "$REPO"
 printf 'dogfood:  %s\n\n' "$DOGFOOD"
 
-git -C "$REPO" fetch origin "$BRANCH"
+git -C "$REPO" fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
 HEAD_SHA="$(git -C "$REPO" rev-parse "origin/$BRANCH")"
 
-if [ -d "$DOGFOOD/.git" ] || git -C "$DOGFOOD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C "$DOGFOOD" fetch origin "$BRANCH"
+if git -C "$DOGFOOD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$DOGFOOD" fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
   git -C "$DOGFOOD" checkout --detach "$HEAD_SHA"
 else
+  [ ! -e "$DOGFOOD" ] || fail "$DOGFOOD exists but is not a Git worktree; move it or override HN_CODEX_DOGFOOD_DIR"
   mkdir -p "$(dirname "$DOGFOOD")"
   git -C "$REPO" worktree add --detach "$DOGFOOD" "$HEAD_SHA"
 fi
@@ -47,8 +48,10 @@ cd "$PROJECT_CWD"
 printf 'Preflight: Handoff will require the Windows worker Codex to expose remote/app-server support and match the Mac Codex version exactly.\n'
 printf 'Launching strict mode now. Any compatibility or worker-side failure will fail closed instead of silently using the legacy remote terminal.\n\n'
 
+set +e
 HN_CODEX_TRANSPORT=app-server node "$DOGFOOD/src/index.js" codex
 RESULT=$?
+set -e
 
 printf '\n== Local TUI exited ==\n'
 printf 'The Windows app-server should still be alive. Checking it now:\n'
