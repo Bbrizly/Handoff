@@ -1,0 +1,127 @@
+name: Apply responsive Herdr integration
+
+on:
+  push:
+    branches:
+      - feat/herdr-responsive-data-plane
+    paths:
+      - .github/workflows/apply-responsive-integration.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: feat/herdr-responsive-data-plane
+
+      - name: Apply narrow integration patch
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Pin the Windows binary only after the published release exposed its
+          # independently verifiable SHA-256.
+          replace_once(
+              "src/herdr-responsive.js",
+              '''  // Filled only after the pinned Windows artifact has completed and its binary\n  // checksum has been independently verified. Mirror mode refuses to install\n  // while this remains empty; stable thin/legacy mode is unaffected.\n  "windows:x64": {\n    file: "herdr-mirror-windows-x86_64.exe",\n    sha256: "",\n  },''',
+              '''  "windows:x64": {\n    file: "herdr-mirror-windows-x86_64.exe",\n    sha256: "3e6fd237375940724c2085adb477f76b5f6d1d42f204913055dda025bd4863a9",\n  },''',
+          )
+
+          replace_once(
+              "src/herdr-thin.js",
+              '  if (["auto", "thin", "legacy"].includes(value)) return value;',
+              '  if (["auto", "mirror", "thin", "legacy"].includes(value)) return value;',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              'import { attachThinHerdr, thinTransportMode } from "./herdr-thin.js";',
+              'import { attachThinHerdr, thinTransportMode } from "./herdr-thin.js";\nimport { attachResponsiveHerdr } from "./herdr-responsive.js";',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              'const CONFIG_RELATIVE = ".hn/herdr/config.toml";',
+              '''const CONFIG_RELATIVE = ".hn/herdr/config.toml";\n\nfunction herdrConfigRelative(worker) {\n  return worker?.__hnHerdrConfigRelative ?? CONFIG_RELATIVE;\n}''',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              '''export function herdrBinaryRelative(worker) {\n  const asset = herdrAssetFor(worker.platform, worker.arch);\n  return `${herdrInstallDir()}/${asset ? asset.binary : "herdr"}`;\n}''',
+              '''export function herdrBinaryRelative(worker) {\n  if (worker?.__hnHerdrBinaryRelative) return worker.__hnHerdrBinaryRelative;\n  const asset = herdrAssetFor(worker.platform, worker.arch);\n  return `${herdrInstallDir()}/${asset ? asset.binary : "herdr"}`;\n}''',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              '''function windowsPrelude(worker, runtime) {\n  return `$env:HERDR_CONFIG_PATH = ${remotePathExpression(CONFIG_RELATIVE)}''',
+              '''function windowsPrelude(worker, runtime) {\n  return `$env:HERDR_CONFIG_PATH = ${remotePathExpression(herdrConfigRelative(worker))}''',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              '''function posixPrelude(worker, runtime) {\n  return `HERDR_CONFIG_PATH="$HOME/${CONFIG_RELATIVE}"''',
+              '''function posixPrelude(worker, runtime) {\n  return `HERDR_CONFIG_PATH="$HOME/${herdrConfigRelative(worker)}"''',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              '''export function ensureHerdrConfig(worker) {\n  const toml = herdrConfigToml(worker.platform);\n  if (worker.platform === "windows") {\n    runPowerShell(worker, `$ErrorActionPreference = 'Stop'\n$hnDir = ${remotePathExpression(".hn/herdr")}\nNew-Item -ItemType Directory -Force -Path $hnDir | Out-Null\nSet-Content -LiteralPath ${remotePathExpression(CONFIG_RELATIVE)} -Value ${quotePowerShell(toml)} -Encoding utf8''',
+              '''export function ensureHerdrConfig(worker) {\n  const toml = herdrConfigToml(worker.platform);\n  const configRelative = herdrConfigRelative(worker);\n  const configDir = configRelative.slice(0, configRelative.lastIndexOf("/"));\n  if (worker.platform === "windows") {\n    runPowerShell(worker, `$ErrorActionPreference = 'Stop'\n$hnDir = ${remotePathExpression(configDir)}\nNew-Item -ItemType Directory -Force -Path $hnDir | Out-Null\nSet-Content -LiteralPath ${remotePathExpression(configRelative)} -Value ${quotePowerShell(toml)} -Encoding utf8''',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              '''  runPosix(worker, `mkdir -p "$HOME/.hn/herdr"\nprintf '%s' ${quotePosix(toml)} > "$HOME/${CONFIG_RELATIVE}"''',
+              '''  runPosix(worker, `mkdir -p "$HOME/${configDir}"\nprintf '%s' ${quotePosix(toml)} > "$HOME/${configRelative}"''',
+          )
+
+          replace_once(
+              "src/herdr.js",
+              '''  if (!backend.attach && transport !== "legacy") {\n    const thin = attachThinHerdr(worker, runtime);''',
+              '''  if (!backend.attach && transport === "mirror") {\n    const mirror = attachResponsiveHerdr(worker, runtime);\n    if (!mirror.available) {\n      fail(`Responsive Herdr mirror is unavailable: ${mirror.reason}`);\n    }\n    const result = { code: mirror.code, stdout: "", stderr: "" };\n    if (result.code === 0) return { ...result, desk: "detached" };\n    if (healthy(worker, runtime)) return { ...result, desk: "detached" };\n    fail(\n      `Lost the responsive local mirror connection to the persistent desk on ${worker.target} (exit ${result.code}).\\n`\n      + "Try: hn doctor",\n    );\n  }\n\n  if (!backend.attach && ["auto", "thin"].includes(transport)) {\n    const thin = attachThinHerdr(worker, runtime);''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '} from "./herdr.js";\nimport { runInteractiveRemoteCommand, runRemoteCommand, sshTransportFailed } from "./remote.js";',
+              '''} from "./herdr.js";\nimport {\n  ensureResponsiveHerdrInstalled,\n  responsiveHerdrRequested,\n  responsiveHerdrWorker,\n  responsiveRuntimeName,\n} from "./herdr-responsive.js";\nimport { runInteractiveRemoteCommand, runRemoteCommand, sshTransportFailed } from "./remote.js";''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '''  worker = context.worker;\n\n  if (worker.herdrVersion !== HERDR_VERSION) {\n    ensureHerdrInstalled(worker, { quiet: false });\n    worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });\n    context = { ...context, worker };\n  }\n  const runtime = herdrRuntimeName(config.controllerId, context.name);''',
+              '''  worker = context.worker;\n\n  const responsive = responsiveHerdrRequested();\n  if (responsive) {\n    // The mirror runtime is deliberately stacked beside the official stable\n    // runtime. Never replace the user's proven 0.8.2 desk while dogfooding.\n    ensureHerdrInstalled(worker, { quiet: false });\n    if (worker.herdrVersion !== HERDR_VERSION) {\n      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });\n    }\n    ensureResponsiveHerdrInstalled(worker, { quiet: false });\n    worker = responsiveHerdrWorker(worker);\n    context = { ...context, worker };\n  } else if (worker.herdrVersion !== HERDR_VERSION) {\n    ensureHerdrInstalled(worker, { quiet: false });\n    worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });\n    context = { ...context, worker };\n  }\n  const stableRuntime = herdrRuntimeName(config.controllerId, context.name);\n  const runtime = responsive ? responsiveRuntimeName(stableRuntime) : stableRuntime;''',
+          )
+
+          replace_once(
+              "src/index.js",
+              '''  if (!probe.installed) {\n    ensureHerdrInstalled(worker, { quiet: false });\n    worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });\n    context = { ...context, worker };\n  }''',
+              '''  if (!probe.installed) {\n    if (responsive) {\n      ensureResponsiveHerdrInstalled(worker, { quiet: false });\n    } else {\n      ensureHerdrInstalled(worker, { quiet: false });\n      worker = persistWorkerMetadata(config, targetName, { ...worker, herdrVersion: HERDR_VERSION });\n      context = { ...context, worker };\n    }\n  }''',
+          )
+          PY
+
+      - name: Verify tests and static checks
+        run: |
+          npm test
+          npm run check
+
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/herdr-responsive.js src/herdr-thin.js src/herdr.js src/index.js
+          git diff --cached --check
+          git commit -m "feat: wire responsive Herdr data plane"
+          git push origin HEAD:feat/herdr-responsive-data-plane
