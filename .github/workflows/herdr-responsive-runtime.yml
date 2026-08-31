@@ -105,11 +105,42 @@ jobs:
             herdr-mirror-windows-x86_64.exe.sha256
           retention-days: 7
 
-  publish:
-    needs: [macos, windows]
+  source:
     runs-on: ubuntu-latest
     steps:
-      - name: Download built assets
+      - name: Checkout exact Corresponding Source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: rrnewton/herdr
+          ref: ${{ env.HERDR_MIRROR_REF }}
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Package exact source and license
+        run: |
+          set -euo pipefail
+          name="herdr-mirror-source-${HERDR_MIRROR_REF}"
+          mkdir -p "$RUNNER_TEMP/$name"
+          rsync -a --exclude '.git' --exclude 'target' ./ "$RUNNER_TEMP/$name/"
+          tar -C "$RUNNER_TEMP" -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          cp LICENSE HERDR-MIRROR-LICENSE.txt
+
+      - name: Upload Corresponding Source
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: herdr-mirror-source
+          path: |
+            herdr-mirror-source-${{ env.HERDR_MIRROR_REF }}.tar.gz
+            herdr-mirror-source-${{ env.HERDR_MIRROR_REF }}.tar.gz.sha256
+            HERDR-MIRROR-LICENSE.txt
+          retention-days: 7
+
+  publish:
+    needs: [macos, windows, source]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built assets and Corresponding Source
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
@@ -122,18 +153,22 @@ jobs:
           sha256sum -c herdr-mirror-macos-aarch64.sha256
           sha256sum -c herdr-mirror-macos-x86_64.sha256
           sha256sum -c herdr-mirror-windows-x86_64.exe.sha256
+          sha256sum -c "herdr-mirror-source-${HERDR_MIRROR_REF}.tar.gz.sha256"
 
-      - name: Publish immutable Handoff prerelease
+      - name: Publish pinned Handoff prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          notes="Pinned build of rrnewton/herdr@${HERDR_MIRROR_REF} for Handoff responsive-mirror dogfood; not an official Herdr release. The pinned Herdr source declares AGPL-3.0-or-later (with a separate commercial-license option). Exact Corresponding Source and the upstream license are attached to this release."
           if ! gh release view "$HERDR_MIRROR_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$HERDR_MIRROR_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --prerelease \
               --title "Responsive Herdr runtime ${HERDR_MIRROR_REF:0:7}" \
-              --notes "Pinned build of rrnewton/herdr@${HERDR_MIRROR_REF} for Handoff responsive-mirror dogfood. Apache-2.0 upstream; not an official Herdr release."
+              --notes "$notes"
+          else
+            gh release edit "$HERDR_MIRROR_TAG" --repo "$GITHUB_REPOSITORY" --notes "$notes"
           fi
           gh release upload "$HERDR_MIRROR_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             dist/herdr-mirror-macos-aarch64 \
@@ -141,4 +176,7 @@ jobs:
             dist/herdr-mirror-macos-x86_64 \
             dist/herdr-mirror-macos-x86_64.sha256 \
             dist/herdr-mirror-windows-x86_64.exe \
-            dist/herdr-mirror-windows-x86_64.exe.sha256
+            dist/herdr-mirror-windows-x86_64.exe.sha256 \
+            "dist/herdr-mirror-source-${HERDR_MIRROR_REF}.tar.gz" \
+            "dist/herdr-mirror-source-${HERDR_MIRROR_REF}.tar.gz.sha256" \
+            dist/HERDR-MIRROR-LICENSE.txt
