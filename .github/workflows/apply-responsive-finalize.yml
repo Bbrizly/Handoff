@@ -18,7 +18,7 @@ jobs:
         with:
           ref: feat/herdr-responsive-data-plane
 
-      - name: Apply final correctness and provenance patches
+      - name: Apply final narrow patches
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -28,11 +28,9 @@ jobs:
               text = p.read_text()
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f"{path}: expected exactly one match, found {count}: {old[:120]!r}")
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}: {old!r}")
               p.write_text(text.replace(old, new, 1))
 
-          # A busy first port attempt must not poison every later retry with a
-          # stale HN-PORTBUSY marker from an append-only log.
           replace_once(
               "src/herdr-responsive.js",
               '    const logPath = join(dir, `forward-${label}.log`);\n    const log = openSync(logPath, "a+");',
@@ -41,211 +39,26 @@ jobs:
 
           test = Path("test/herdr-responsive.test.js")
           text = test.read_text()
-          guard = '''\n\ntest("responsive port retries cannot inherit stale readiness markers", () => {\n  const source = readFileSync(new URL("../src/herdr-responsive.js", import.meta.url), "utf8");\n  assert.match(source, /forward-\\$\\{label\\}-\\$\\{attempt\\}\\.log/);\n  assert.match(source, /openSync\\(logPath, "w\\+"\\)/);\n  assert.doesNotMatch(source, /openSync\\(logPath, "a\\+"\\)/);\n});\n'''
           if "responsive port retries cannot inherit stale readiness markers" not in text:
+              guard = '\n\ntest("responsive port retries cannot inherit stale readiness markers", () => {\n  const source = readFileSync(new URL("../src/herdr-responsive.js", import.meta.url), "utf8");\n  assert.match(source, /forward-\\$\\{label\\}-\\$\\{attempt\\}\\.log/);\n  assert.match(source, /openSync\\(logPath, "w\\+"\\)/);\n  assert.doesNotMatch(source, /openSync\\(logPath, "a\\+"\\)/);\n});\n'
               test.write_text(text.rstrip() + guard)
 
-          notices = '''# Third-Party Notices
-
-`hn` is an independent implementation.
-
-## EnvHaven
-
-EnvHaven (`envhaven/envhaven`) was studied as an architectural reference for the local-editor + remote-execution workflow. No EnvHaven source code is vendored in this repository.
-
-## Mutagen
-
-`hn` downloads the pinned official Mutagen v0.18.1 release archive at runtime from the upstream GitHub release, verifies it against the upstream `SHA256SUMS`, and stores the executable plus `mutagen-agents.tar.gz` under the user's `~/.hn/bin` directory. Mutagen binaries are not committed or redistributed in this repository. Mutagen licensing differs by build; review the upstream license before packaging or redistributing Mutagen as part of a public/commercial installer.
-
-## Herdr
-
-The default persistent desk uses the official Herdr v0.8.2 release from `herdrdev/herdr`. Handoff verifies the pinned SHA-256 on the controller and installs it under `~/.hn/bin/herdr/0.8.2/`. Herdr v0.8.2 is Apache-2.0 licensed. The Windows release is kept as its full upstream bundle so its Microsoft ConPTY components and bundled notices remain together.
-
-The default local-renderer path also uses the same official Herdr v0.8.2 client. Handoff owns only the local Unix-socket forwarding/relay layer and the connect-only Windows bridge to the already-running official server.
-
-### Responsive mirror dogfood runtime
-
-`HN_HERDR_TRANSPORT=mirror` is an explicit experimental path and does **not** use the official v0.8.2 protocol. It runs a separate, non-colliding Herdr desk built from exactly `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990` (Herdr 0.7.4 / protocol 17). That pinned source declares `AGPL-3.0-or-later` and also references a separate commercial-license option.
-
-Handoff publishes the corresponding controller and Windows binaries as the prerelease `herdr-mirror-20a0cd5294fb15ef17209612d80d5a2704169990`, pins their SHA-256 values in source, and publishes the exact Corresponding Source archive plus the upstream license beside the binaries. The responsive runtime remains a separate executable process communicating with Handoff over sockets/SSH; it is isolated from the official v0.8.2 desk, config, state, and session name.
-
-The Windows responsive executable is placed beside the already-installed official v0.8.2 Windows bundle components rather than replacing the official installation. The responsive desk has its own install/config directories under `~/.hn/bin/herdr-mirror/` and `~/.hn/herdr-mirror/`.
-
-Herdr remains a replaceable persistence backend behind Handoff's boundary. Handoff does not vendor Herdr source into this repository; the exact responsive Corresponding Source is distributed with the pinned prerelease artifact.
-'''
-          Path("THIRD_PARTY_NOTICES.md").write_text(notices)
-
-          dogfood = '''# Responsive Herdr mirror dogfood
-
-This validates the experimental local-terminal data plane without changing the proven official Herdr v0.8.2 desk.
-
-## What is isolated
-
-`HN_HERDR_TRANSPORT=mirror` uses a separate pinned Herdr runtime built from `rrnewton/herdr@20a0cd5294fb15ef17209612d80d5a2704169990` (0.7.4 / protocol 17). It has a distinct binary directory, config directory, local client state, and session name. The normal `auto`, `thin`, and `legacy` paths stay on official Herdr v0.8.2.
-
-Architecture:
-
-```text
-Mac / Zed terminal
-  -> pinned responsive Herdr --mirror client (local terminal emulator + local scrollback)
-  -> private herdr.sock + herdr-client.sock Unix forwards
-  -> Handoff SSH policy / ControlMaster
-  -> two loopback-only, same-user Windows pipe bridges
-  -> pinned responsive Herdr server on Windows
-  -> persistent Windows panes / Claude / Codex / builds
-```
-
-The Windows server remains authoritative for process/session ownership. The Mac mirror owns terminal interpretation, scrollback, selection, search, keyboard handling, mouse handling, and resize rendering.
-
-## Prepare the stacked dogfood checkout
-
-The responsive branch is stacked on `feat/local-herdr-thin-client`; do not replace your normal checkout.
-
-```bash
-cd "$HOME/Documents/GitHub/Handoff"
-git fetch origin
-
-DOGFOOD="$HOME/.hn/dogfood/Handoff-mirror"
-if [ -d "$DOGFOOD" ]; then
-  git -C "$DOGFOOD" fetch origin
-  git -C "$DOGFOOD" checkout --detach origin/feat/herdr-responsive-data-plane
-else
-  git worktree add --detach "$DOGFOOD" origin/feat/herdr-responsive-data-plane
-fi
-
-cd "$DOGFOOD"
-npm test
-npm run check
-export HN="$DOGFOOD/src/index.js"
-```
-
-## Prove the normal worker first
-
-From the real Handoff project on the Mac:
-
-```bash
-cd "$HOME/Documents/GitHub/Handoff"
-node "$HN" worker list
-node "$HN" doctor pc
-node "$HN" sync
-```
-
-The normal official desk must still work:
-
-```bash
-HN_HERDR_TRANSPORT=thin node "$HN" pc -p
-```
-
-Detach with `Ctrl+B`, then `q`.
-
-## Capture the official and responsive server processes
-
-On Windows before mirror mode:
-
-```powershell
-Get-Process herdr -ErrorAction SilentlyContinue |
-  Select-Object Id,StartTime,Path |
-  Sort-Object Id
-```
-
-Then on the Mac run the explicit mirror path:
-
-```bash
-HN_HERDR_TRANSPORT=mirror node "$HN" pc -p
-```
-
-First use downloads checksum-pinned controller/worker binaries and starts a **separate** `-mirror-20a0cd5` desk. It must not stop or replace the official v0.8.2 server.
-
-While the mirror is open, in a second Mac terminal:
-
-```bash
-pgrep -fl 'herdr-mirror|herdr-responsive|ssh'
-ls -ld /tmp/hn-herdr-mirror-* 2>/dev/null || true
-```
-
-On Windows, run the process listing again. The original official Herdr PID/start time must still be present; one separate responsive Herdr server is expected.
-
-## Human interaction gate
-
-Inside the responsive desk test all of these in an ordinary PowerShell pane and then in Claude:
-
-- type continuously: characters must appear without the old server-rendering drag;
-- Option+Backspace deletes one word, not the whole line;
-- arrows, Ctrl+C, paste;
-- rapid Zed terminal resize;
-- mouse/sidebar/project switching;
-- scrollback, selection, and search should be local-feeling;
-- run `claude`; Handoff statusline/workspace roots must still be present;
-- detach and reattach with the same mirror command; the responsive Windows desk/processes must survive;
-- close the Mac terminal entirely, open a new one, and reattach; the responsive Windows server and Claude PIDs must be unchanged.
-
-For an A/B comparison use the same project and network:
-
-```bash
-HN_HERDR_TRANSPORT=legacy node "$HN" pc -p
-HN_HERDR_TRANSPORT=thin   node "$HN" pc -p
-HN_HERDR_TRANSPORT=mirror node "$HN" pc -p
-```
-
-## Failure interpretation
-
-- `thin` good + `mirror` faster: the replicated local terminal data plane is the right latency architecture.
-- `thin` good + `mirror` same: remaining delay is network/input acknowledgment, not server terminal rendering.
-- `mirror` fails before opening: install/protocol/socket/SSH-forward preflight; the official desk is untouched.
-- `mirror` disconnects while the Windows responsive server PID survives: transport failure, not persistence failure.
-- official v0.8.2 server PID changes during mirror attach: stop; that violates the isolation boundary.
-
-## Rollback
-
-No uninstall is required. Stop using the explicit environment variable:
-
-```bash
-node "$HN" pc -p
-```
-
-That returns to the normal official v0.8.2 `auto` path. The responsive runtime lives only under Handoff-owned `~/.hn/bin/herdr-mirror/`, `~/.hn/herdr-mirror/`, and `~/.hn/herdr/local-mirror/` paths.
-
-## Completion gate
-
-```text
-[ ] normal thin desk still works
-[ ] mirror opens a separate responsive desk
-[ ] official v0.8.2 server PID/start time unchanged
-[ ] local responsive Herdr process is visible on Mac
-[ ] Option+Backspace correct in shell
-[ ] Option+Backspace correct in Claude
-[ ] typing materially more local-feeling than thin/legacy
-[ ] resize/mouse/sidebar correct
-[ ] local scrollback/search/selection correct
-[ ] Claude Handoff statusline/workspace parity correct
-[ ] detach/reattach preserves responsive desk
-[ ] controller terminal close preserves responsive desk
-[ ] no runtime-only Herdr override fields persisted into worker config
-```
-'''
-          Path("docs/RESPONSIVE_HERDR_DOGFOOD.md").write_text(dogfood)
-
           readme = Path("README.md")
-          r = readme.read_text()
-          anchor = "- [`docs/THIN_HERDR_DOGFOOD.md`](./docs/THIN_HERDR_DOGFOOD.md): exact Mac -> Windows physical validation for the local-renderer persistent desk path.\n"
-          addition = anchor + "- [`docs/RESPONSIVE_HERDR_DOGFOOD.md`](./docs/RESPONSIVE_HERDR_DOGFOOD.md): isolated A/B dogfood for the experimental replicated local-terminal data plane.\n"
-          if "RESPONSIVE_HERDR_DOGFOOD.md" not in r:
-              if anchor not in r:
+          text = readme.read_text()
+          anchor = '- [`docs/THIN_HERDR_DOGFOOD.md`](./docs/THIN_HERDR_DOGFOOD.md): exact Mac -> Windows physical validation for the local-renderer persistent desk path.\n'
+          if "RESPONSIVE_HERDR_DOGFOOD.md" not in text:
+              if anchor not in text:
                   raise SystemExit("README dogfood anchor changed")
-              readme.write_text(r.replace(anchor, addition, 1))
+              readme.write_text(text.replace(anchor, anchor + '- [`docs/RESPONSIVE_HERDR_DOGFOOD.md`](./docs/RESPONSIVE_HERDR_DOGFOOD.md): isolated A/B dogfood for the experimental replicated local-terminal data plane.\n', 1))
 
-          workflow = Path(".github/workflows/herdr-responsive-runtime.yml")
-          w = workflow.read_text()
-          smoke_marker = "Smoke responsive Windows runtime with official 0.8.2 bundle"
-          if smoke_marker not in w:
-              needle = '''          $hash = (Get-FileHash -Algorithm SHA256 herdr-mirror-windows-x86_64.exe).Hash.ToLowerInvariant()\n          "$hash  herdr-mirror-windows-x86_64.exe" | Out-File -Encoding ascii herdr-mirror-windows-x86_64.exe.sha256\n\n      - name: Upload runtime asset'''
-              smoke = '''          $hash = (Get-FileHash -Algorithm SHA256 herdr-mirror-windows-x86_64.exe).Hash.ToLowerInvariant()\n          "$hash  herdr-mirror-windows-x86_64.exe" | Out-File -Encoding ascii herdr-mirror-windows-x86_64.exe.sha256\n\n      - name: Smoke responsive Windows runtime with official 0.8.2 bundle\n        shell: pwsh\n        run: |\n          $ErrorActionPreference = 'Stop'\n          $zip = Join-Path $env:RUNNER_TEMP 'herdr-0.8.2.zip'\n          $bundle = Join-Path $env:RUNNER_TEMP 'herdr-mirror-smoke'\n          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/herdrdev/herdr/releases/download/v0.8.2/herdr-windows-x86_64.zip' -OutFile $zip\n          $expected = '0ab3d0fe1434d55757997542b978c771d642987bb15a7130f4160f0db38821d5'\n          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()\n          if ($actual -ne $expected) { throw "official Herdr bundle checksum mismatch: $actual" }\n          New-Item -ItemType Directory -Force -Path $bundle | Out-Null\n          Expand-Archive -LiteralPath $zip -DestinationPath $bundle -Force\n          Copy-Item -LiteralPath .\\herdr-mirror-windows-x86_64.exe -Destination (Join-Path $bundle 'herdr.exe') -Force\n          $exe = Join-Path $bundle 'herdr.exe'\n          $version = (& $exe --version | Out-String).Trim()\n          if ($LASTEXITCODE -ne 0 -or $version -notmatch '0\\.7\\.4') { throw "unexpected responsive Herdr version: $version" }\n          $config = Join-Path $env:RUNNER_TEMP 'herdr-mirror-smoke.toml'\n          @'\n          onboarding = false\n          [update]\n          version_check = false\n          manifest_check = false\n          [terminal]\n          default_shell = "powershell.exe"\n          '@ | Set-Content -LiteralPath $config -Encoding utf8\n          $env:HERDR_CONFIG_PATH = $config\n          $env:XDG_CONFIG_HOME = Join-Path $env:RUNNER_TEMP 'hn-xdg-config'\n          $env:XDG_STATE_HOME = Join-Path $env:RUNNER_TEMP 'hn-xdg-state'\n          $env:XDG_CACHE_HOME = Join-Path $env:RUNNER_TEMP 'hn-xdg-cache'\n          $session = "hn-ci-$env:GITHUB_RUN_ID"\n          $server = Start-Process -FilePath $exe -ArgumentList @('--session', $session, 'server') -PassThru -WindowStyle Hidden\n          try {\n            $running = $false\n            for ($i = 0; $i -lt 40; $i++) {\n              $status = (& $exe --session $session status server --json 2>$null | Out-String).Trim()\n              if ($LASTEXITCODE -eq 0 -and $status -match '\"running\":true') { $running = $true; break }\n              Start-Sleep -Milliseconds 250\n            }\n            if (-not $running) { throw 'responsive Herdr server did not become ready' }\n            $createdRaw = (& $exe --session $session workspace create --cwd $env:GITHUB_WORKSPACE --label smoke --focus | Out-String).Trim()\n            if ($LASTEXITCODE -ne 0) { throw "workspace create failed: $createdRaw" }\n            $created = $createdRaw | ConvertFrom-Json\n            $workspaceId = [string]$created.result.workspace.workspace_id\n            if ([string]::IsNullOrWhiteSpace($workspaceId)) { throw "workspace id missing: $createdRaw" }\n            $panesRaw = (& $exe --session $session pane list --workspace $workspaceId | Out-String).Trim()\n            if ($LASTEXITCODE -ne 0) { throw "pane list failed: $panesRaw" }\n            $panes = $panesRaw | ConvertFrom-Json\n            $paneId = [string]$panes.result.panes[0].pane_id\n            if ([string]::IsNullOrWhiteSpace($paneId)) { throw "pane id missing: $panesRaw" }\n            & $exe --session $session pane run $paneId 'Write-Output HN_MIRROR_SMOKE' | Out-Null\n            if ($LASTEXITCODE -ne 0) { throw 'pane run failed' }\n            $seen = $false\n            for ($i = 0; $i -lt 20; $i++) {\n              $read = (& $exe --session $session pane read $paneId --lines 40 | Out-String)\n              if ($read -match 'HN_MIRROR_SMOKE') { $seen = $true; break }\n              Start-Sleep -Milliseconds 250\n            }\n            if (-not $seen) { throw 'ConPTY smoke output never appeared in pane readback' }\n          } finally {\n            & $exe --session $session server stop *> $null\n            if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }\n          }\n\n      - name: Upload runtime asset'''
-              if needle not in w:
-                  raise SystemExit("runtime workflow Windows build anchor changed")
-              workflow.write_text(w.replace(needle, smoke, 1))
+          replace_once(
+              ".github/workflows/herdr-responsive-runtime.yml",
+              'on:\n  push:\n    branches:\n      - feat/herdr-responsive-data-plane\n    paths:\n      - .github/workflows/herdr-responsive-runtime.yml\n  workflow_dispatch:\n',
+              'on:\n  workflow_dispatch:\n',
+          )
           PY
 
-      - name: Verify repository tests and static checks
+      - name: Verify tests and static checks
         run: |
           npm test
           npm run check
@@ -260,7 +73,7 @@ That returns to the normal official v0.8.2 `auto` path. The responsive runtime l
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/herdr-responsive.js test/herdr-responsive.test.js THIRD_PARTY_NOTICES.md README.md docs/RESPONSIVE_HERDR_DOGFOOD.md .github/workflows/herdr-responsive-runtime.yml
+          git add src/herdr-responsive.js test/herdr-responsive.test.js README.md .github/workflows/herdr-responsive-runtime.yml
           git diff --cached --check
-          git commit -m "fix: finalize responsive Herdr isolation and smoke coverage"
+          git commit -m "fix: finalize responsive Herdr isolation"
           git push origin HEAD:feat/herdr-responsive-data-plane
