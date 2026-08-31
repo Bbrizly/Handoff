@@ -311,12 +311,14 @@ export function ensureCodexAppServer(worker, { controllerId, targetName, version
 }
 
 export function codexAppServerStatus(worker, { controllerId, targetName }) {
+  if (worker.platform !== "windows") return { serviceId: null, ready: false, processOk: false };
   const serviceId = codexServiceId(serviceIdentity(controllerId, targetName, worker));
   const state = probeWindowsService(worker, serviceId);
   return state ? { serviceId, ...state } : { serviceId, ready: false, processOk: false };
 }
 
 export function stopCodexAppServer(worker, { controllerId, targetName }) {
+  if (worker.platform !== "windows") return false;
   const serviceId = codexServiceId(serviceIdentity(controllerId, targetName, worker));
   const state = probeWindowsService(worker, serviceId);
   if (!state) return false;
@@ -372,6 +374,34 @@ function waitForChild(child) {
   });
 }
 
+function terminateChild(child, signal = "SIGTERM") {
+  if (child && child.exitCode == null && child.signalCode == null) {
+    try { child.kill(signal); } catch { }
+  }
+}
+
+function controllerSignalGuard(client, tunnel) {
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  let shuttingDown = false;
+  const handlers = new Map();
+  for (const signal of signals) {
+    const handler = () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      terminateChild(client, signal);
+      terminateChild(tunnel, "SIGTERM");
+      // Restore normal signal semantics after our children are cleaned up.
+      for (const [name, fn] of handlers) process.off(name, fn);
+      process.kill(process.pid, signal);
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+  };
+}
+
 export async function runCodexRemoteTui(worker, {
   controllerId,
   targetName,
@@ -401,6 +431,8 @@ export async function runCodexRemoteTui(worker, {
   const spawnProcess = backend.spawn ?? spawn;
   const tunnel = spawnProcess("ssh", tunnelArgs, { stdio: ["ignore", "ignore", "pipe"] });
   tunnel.stderr?.on("data", (chunk) => { tunnelStderr += String(chunk); });
+  let client = null;
+  let releaseSignalGuard = () => {};
 
   try {
     await (backend.waitReady ?? waitForLocalReady)(localPort, tunnel, () => tunnelStderr);
@@ -409,10 +441,12 @@ export async function runCodexRemoteTui(worker, {
       "--cd", remoteAbsoluteCwd,
       ...args,
     ];
-    const client = spawnProcess("codex", codexArgs, { stdio: "inherit", env: process.env });
+    client = spawnProcess("codex", codexArgs, { stdio: "inherit", env: process.env });
+    releaseSignalGuard = (backend.signalGuard ?? controllerSignalGuard)(client, tunnel);
     const result = await waitForChild(client);
     return { ...result, service, localPort, remoteCwd: remoteAbsoluteCwd };
   } finally {
-    if (tunnel.exitCode == null) tunnel.kill("SIGTERM");
+    releaseSignalGuard();
+    terminateChild(tunnel, "SIGTERM");
   }
 }
