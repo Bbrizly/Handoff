@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import {
   CODEX_REMOTE_MIN_VERSION,
   codexRemoteCompatibility,
@@ -8,6 +9,7 @@ import {
   codexVersionAtLeast,
   compareCodexVersions,
   parseCodexVersion,
+  runCodexRemoteTui,
   shouldUseCodexRemoteTui,
 } from "../src/codex-remote.js";
 import { sshLocalForwardArgs } from "../src/ssh.js";
@@ -78,4 +80,68 @@ test("Codex tunnel is a dedicated localhost-only SSH session", () => {
     () => sshLocalForwardArgs({ target: "u@h" }, { localPort: 0, remotePort: 4500 }),
     /localPort/,
   );
+});
+
+function fakeChild({ closeSoon = false } = {}) {
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kills = [];
+  child.stderr = new EventEmitter();
+  child.kill = (signal) => {
+    child.kills.push(signal);
+    child.signalCode = signal;
+    return true;
+  };
+  if (closeSoon) {
+    queueMicrotask(() => {
+      child.exitCode = 0;
+      child.emit("close", 0, null);
+    });
+  }
+  return child;
+}
+
+test("remote TUI launches stock local Codex against worker cwd and always tears down only the SSH tunnel", async () => {
+  const calls = [];
+  const tunnel = fakeChild();
+  const client = fakeChild({ closeSoon: true });
+  const worker = { target: "Lenovo@100.68.238.25", port: 22, platform: "windows" };
+  const compatibility = { ok: true, version: parseCodexVersion("0.150.1") };
+
+  const result = await runCodexRemoteTui(worker, {
+    controllerId: "controller-1",
+    targetName: "pc",
+    remoteCwd: "~/hn/main/GitHub/Handoff",
+    args: ["--model", "gpt-5.5"],
+    compatibility,
+    backend: {
+      ensureServer: () => ({ serviceId: "svc", port: 43876, pid: 1234, reused: true }),
+      resolveRemoteCwd: () => "C:\\Users\\Lenovo\\hn\\main\\GitHub\\Handoff",
+      reserveLocalPort: async () => 49123,
+      waitReady: async () => {},
+      signalGuard: () => () => {},
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
+        if (command === "ssh") return tunnel;
+        if (command === "codex") return client;
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+  });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].command, "ssh");
+  assert.ok(calls[0].args.includes("127.0.0.1:49123:127.0.0.1:43876"));
+  assert.equal(calls[1].command, "codex");
+  assert.deepEqual(calls[1].args, [
+    "--remote", "ws://127.0.0.1:49123",
+    "--cd", "C:\\Users\\Lenovo\\hn\\main\\GitHub\\Handoff",
+    "--model", "gpt-5.5",
+  ]);
+  assert.equal(calls[1].options.stdio, "inherit");
+  assert.deepEqual(tunnel.kills, ["SIGTERM"]);
+  assert.deepEqual(client.kills, []);
+  assert.equal(result.service.pid, 1234);
+  assert.equal(result.code, 0);
 });
