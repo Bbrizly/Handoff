@@ -82,7 +82,7 @@ test("Codex tunnel is a dedicated localhost-only SSH session", () => {
   );
 });
 
-function fakeChild({ closeSoon = false } = {}) {
+function fakeChild() {
   const child = new EventEmitter();
   child.exitCode = null;
   child.signalCode = null;
@@ -93,19 +93,13 @@ function fakeChild({ closeSoon = false } = {}) {
     child.signalCode = signal;
     return true;
   };
-  if (closeSoon) {
-    queueMicrotask(() => {
-      child.exitCode = 0;
-      child.emit("close", 0, null);
-    });
-  }
   return child;
 }
 
 test("remote TUI launches stock local Codex against worker cwd and always tears down only the SSH tunnel", async () => {
   const calls = [];
   const tunnel = fakeChild();
-  const client = fakeChild({ closeSoon: true });
+  const client = fakeChild();
   const worker = { target: "Lenovo@100.68.238.25", port: 22, platform: "windows" };
   const compatibility = { ok: true, version: parseCodexVersion("0.150.1") };
 
@@ -124,7 +118,13 @@ test("remote TUI launches stock local Codex against worker cwd and always tears 
       spawn: (command, args, options) => {
         calls.push({ command, args, options });
         if (command === "ssh") return tunnel;
-        if (command === "codex") return client;
+        if (command === "codex") {
+          setImmediate(() => {
+            client.exitCode = 0;
+            client.emit("close", 0, null);
+          });
+          return client;
+        }
         throw new Error(`unexpected command ${command}`);
       },
     },
