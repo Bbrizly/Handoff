@@ -75,6 +75,36 @@ function baseArgs(worker, tty = false) {
   return args;
 }
 
+// A forwarding-only session has its own lifecycle. Never attach it to the
+// shared ControlMaster: killing a thin client must remove only its tunnel, and
+// losing that tunnel must not disturb any other Handoff SSH command.
+export function sshLocalForwardArgs(worker, {
+  localHost = "127.0.0.1",
+  localPort,
+  remoteHost = "127.0.0.1",
+  remotePort,
+} = {}) {
+  for (const [label, value] of [["localPort", localPort], ["remotePort", remotePort]]) {
+    if (!Number.isInteger(value) || value < 1 || value > 65535) fail(`${label} must be an integer from 1 to 65535.`);
+  }
+  const args = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=5",
+    "-o", "ConnectionAttempts=1",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=3",
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=none",
+    "-o", "ExitOnForwardFailure=yes",
+    "-N",
+    "-L", `${localHost}:${localPort}:${remoteHost}:${remotePort}`,
+  ];
+  if (worker.port && worker.port !== 22) args.push("-p", String(worker.port));
+  args.push(worker.target);
+  return args;
+}
+
 export function encodePowerShell(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }

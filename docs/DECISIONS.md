@@ -1096,3 +1096,17 @@ Removed in 0.2.0:
 `SessionBackend` stays as a boundary. Replacing Herdr must not require touching target or workspace logic.
 
 Users who want a multiplexer can still run one themselves inside `hn pc`. Handoff does not install it, pin it, or claim it.
+
+---
+
+## HN-079 — Codex uses its native remote app-server boundary instead of terminal remoting
+
+**Status:** Provisional; implementation/CI may prove mechanics, reference-hardware resource/UX gate remains
+
+For interactive Codex, the desired boundary is not a remote terminal. Current Codex exposes a stock remote TUI (`codex --remote`) backed by `codex app-server`. Handoff therefore keeps the human-facing TUI on the controller and the stateful Codex backend on the worker. The worker app-server owns agent/thread state, project cwd, tools, and execution; the controller owns keyboard handling and rendering.
+
+Handoff starts one detached, localhost-only app-server per controller+target, records the exact worker PID/port/version under `~/.hn/state`, verifies `/readyz` and the recorded process command line before reuse, and uses a dedicated SSH local forward for each attached TUI. The tunnel has no shared ControlMaster lifecycle and disappears when the local TUI exits. The app-server survives controller/TUI loss.
+
+The path requires controller/worker Codex versions to match exactly and uses a conservative tested floor of 0.150.1 because older remote-TUI builds had remote-only `--cd` validation bugs. `auto` falls back to legacy terminal remoting before local TUI launch if prerequisites fail; `app-server` fails closed; `legacy` preserves existing behavior. Codex management/noninteractive commands stay worker-side.
+
+Herdr is not in the Codex protocol data path. It may later surface/manage backend agents, but terminal rendering or PTY mirroring is not required for Codex when its native client/server protocol is available.

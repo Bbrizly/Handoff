@@ -12,6 +12,13 @@ import {
   updateConfig,
 } from "./config.js";
 import { additionalWorkspaceDirs, augmentAgentCommand, isClaudeWorkCommand } from "./agent.js";
+import {
+  codexAppServerStatus,
+  codexRemoteCompatibility,
+  runCodexRemoteTui,
+  shouldUseCodexRemoteTui,
+  stopCodexAppServer,
+} from "./codex-remote.js";
 import { isPersistFlag, parseModeArgs, parseTargetInvocation } from "./cli-routing.js";
 import { ensureControllerSshKey, windowsPairCommand } from "./pair.js";
 import { parseSshTarget, testSsh } from "./ssh.js";
@@ -85,7 +92,7 @@ import {
 
 const RESERVED_COMMANDS = new Set([
   "help", "status", "doctor", "worker", "workspace", "sync",
-  "port", "exec", "shell", "on", "use", "profile", "access",
+  "port", "exec", "shell", "on", "use", "profile", "access", "codex-server",
 ]);
 const TARGET_HINTS = new Set(["home", "pc", "aws", "local"]);
 
@@ -100,6 +107,8 @@ Everyday:
   hn on <target> <command>   one-shot target without changing terminal state
   HN_TARGET=pc hn claude     explicit environment override
   hn claude                  direct interactive Claude on the selected target
+  hn codex                   local Codex TUI + remote worker agent runtime when supported
+  hn codex-server status     inspect the persistent worker Codex backend
   hn shell                   open the selected target's mapped remote shell
   hn pc -p                   same compute, persistent desk that survives closing this
   hn pc -p claude            persistent desk, running Claude
@@ -645,6 +654,40 @@ function managedGuard(context, roots) {
   return managedAssetGuardScript(context.worker, managedExpectationFor(roots));
 }
 
+async function runCodex(config, targetName, args = [], { preparedWorker = null } = {}) {
+  const mode = String(process.env.HN_CODEX_TRANSPORT ?? "auto").trim().toLowerCase();
+  if (!["auto", "app-server", "legacy"].includes(mode)) {
+    fail("HN_CODEX_TRANSPORT must be auto, app-server, or legacy.");
+  }
+
+  const worker = preparedWorker ?? prepareTarget(config, targetName);
+  if (mode === "legacy" || !shouldUseCodexRemoteTui(args)) {
+    runInteractive(config, targetName, ["codex", ...args], { preparedWorker: worker });
+    return;
+  }
+
+  const compatibility = codexRemoteCompatibility(worker);
+  if (!compatibility.ok) {
+    if (mode === "app-server") fail(`Codex thin client unavailable: ${compatibility.reason}`);
+    console.warn(`hn: Codex thin client unavailable (${compatibility.reason}); using the worker terminal instead.`);
+    runInteractive(config, targetName, ["codex", ...args], { preparedWorker: worker });
+    return;
+  }
+
+  let context = findContext(config, process.cwd());
+  context = { ...context, targetName, worker };
+  ensureWorkspaceSync(config, context);
+  const remoteCwd = mapLocalToRemote(context.root, process.cwd());
+  const result = await runCodexRemoteTui(worker, {
+    controllerId: config.controllerId,
+    targetName,
+    remoteCwd,
+    args,
+    compatibility,
+  });
+  if (result.code) process.exitCode = result.code;
+}
+
 function runInteractive(config, targetName, commandArgs = [], { preparedWorker = null } = {}) {
   let context = findContext(config, process.cwd());
   let worker = preparedWorker ?? prepareTarget(config, targetName);
@@ -714,12 +757,39 @@ async function main() {
   if (targetInvocation) {
     if (targetInvocation.mode === "persistent") {
       runPersistentDesk(config, targetInvocation.targetName, targetInvocation.commandArgs);
+    } else if (String(targetInvocation.commandArgs[0] ?? "").toLowerCase() === "codex") {
+      await runCodex(config, targetInvocation.targetName, targetInvocation.commandArgs.slice(1));
     } else {
       runInteractive(config, targetInvocation.targetName, targetInvocation.commandArgs);
     }
     return;
   } else if (TARGET_HINTS.has(possibleTarget) && !config.workers[possibleTarget]) {
     fail(`Target '${possibleTarget}' is not configured. Run: hn worker pair ${possibleTarget} user@host`);
+  }
+
+  if (command === "codex") {
+    await runCodex(config, targetFor(config).name, args);
+    return;
+  }
+
+  if (command === "codex-server") {
+    const sub = String(args[0] ?? "status").toLowerCase();
+    if (!["status", "stop"].includes(sub)) fail("Usage: hn codex-server <status|stop>");
+    const target = targetFor(config);
+    const worker = prepareTarget(config, target.name);
+    if (worker.platform !== "windows") fail("Codex app-server management currently requires a Windows worker.");
+    if (sub === "stop") {
+      const stopped = stopCodexAppServer(worker, { controllerId: config.controllerId, targetName: target.name });
+      console.log(stopped ? `stopped Codex app-server on ${target.name}` : `no Handoff Codex app-server is recorded on ${target.name}`);
+      return;
+    }
+    const state = codexAppServerStatus(worker, { controllerId: config.controllerId, targetName: target.name });
+    if (!state.ready) {
+      console.log(`codex      —  no healthy Handoff app-server on ${target.name}`);
+      return;
+    }
+    console.log(`codex      ✓  ${target.name}  pid ${state.pid}  127.0.0.1:${state.port}  ${state.version}`);
+    return;
   }
 
   if (command === "use") {
