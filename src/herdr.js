@@ -3,8 +3,10 @@
 // Everything Handoff knows about Herdr lives here. Nothing outside this module
 // builds a Herdr command line.
 //
-// Herdr is Apache-2.0 and is downloaded from its immutable GitHub release,
-// checksum-verified on the controller, then copied to the worker.
+// The default persistence runtime is official Apache-2.0 Herdr v0.8.2,
+// checksum-verified on the controller, then copied to the worker. The explicit
+// responsive-mirror dogfood runtime is a separate pinned AGPL-3.0-or-later
+// third-party build documented in THIRD_PARTY_NOTICES.md.
 
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -521,12 +523,10 @@ export function runInHerdrProject(worker, runtime, workspaceId, commandArgs) {
   return { focused: false };
 }
 
-// Prefer Herdr's local thin-client architecture when the controller/worker pair
-// supports the pinned Windows bridge. Handoff still owns the Windows server,
-// config and persistence lifetime; the local Herdr process is only the renderer.
-// Any pre-launch compatibility failure falls back to the proven ssh-tty path in
-// auto mode. Tests can continue injecting backend.attach without touching the
-// real thin-client runtime.
+// Default auto mode prefers the official local thin client and preserves the
+// proven legacy fallback. Explicit mirror mode is intentionally separate: it
+// connects a pinned responsive Herdr client to a separately named responsive
+// desk and never falls back across protocol/runtime boundaries.
 export function attachHerdr(worker, runtime, backend = {}) {
   const healthy = backend.healthy ?? deskIsHealthy;
   const transport = backend.transport ?? thinTransportMode();
