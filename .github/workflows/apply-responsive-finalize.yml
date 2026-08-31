@@ -18,7 +18,7 @@ jobs:
         with:
           ref: feat/herdr-responsive-data-plane
 
-      - name: Apply final narrow patches
+      - name: Apply final source patches
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -31,11 +31,14 @@ jobs:
                   raise SystemExit(f"{path}: expected exactly one match, found {count}: {old!r}")
               p.write_text(text.replace(old, new, 1))
 
-          replace_once(
-              "src/herdr-responsive.js",
-              '    const logPath = join(dir, `forward-${label}.log`);\n    const log = openSync(logPath, "a+");',
-              '    const logPath = join(dir, `forward-${label}-${attempt}.log`);\n    const log = openSync(logPath, "w+");',
-          )
+          source = Path("src/herdr-responsive.js")
+          text = source.read_text()
+          if 'forward-${label}-${attempt}.log' not in text:
+              replace_once(
+                  source,
+                  '    const logPath = join(dir, `forward-${label}.log`);\n    const log = openSync(logPath, "a+");',
+                  '    const logPath = join(dir, `forward-${label}-${attempt}.log`);\n    const log = openSync(logPath, "w+");',
+              )
 
           test = Path("test/herdr-responsive.test.js")
           text = test.read_text()
@@ -50,12 +53,6 @@ jobs:
               if anchor not in text:
                   raise SystemExit("README dogfood anchor changed")
               readme.write_text(text.replace(anchor, anchor + '- [`docs/RESPONSIVE_HERDR_DOGFOOD.md`](./docs/RESPONSIVE_HERDR_DOGFOOD.md): isolated A/B dogfood for the experimental replicated local-terminal data plane.\n', 1))
-
-          replace_once(
-              ".github/workflows/herdr-responsive-runtime.yml",
-              'on:\n  push:\n    branches:\n      - feat/herdr-responsive-data-plane\n    paths:\n      - .github/workflows/herdr-responsive-runtime.yml\n  workflow_dispatch:\n',
-              'on:\n  workflow_dispatch:\n',
-          )
           PY
 
       - name: Verify tests and static checks
@@ -64,16 +61,15 @@ jobs:
           npm run check
           git diff --check
 
-      - name: Remove one-shot patch workflows
-        run: |
-          git rm -f .github/workflows/apply-responsive-finalize.yml
-          git rm -f .github/workflows/apply-responsive-hardening.yml
-
-      - name: Commit finalized integration
+      - name: Commit source finalization
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/herdr-responsive.js test/herdr-responsive.test.js README.md .github/workflows/herdr-responsive-runtime.yml
+          git add src/herdr-responsive.js test/herdr-responsive.test.js README.md
           git diff --cached --check
+          if git diff --cached --quiet; then
+            echo "source already finalized"
+            exit 0
+          fi
           git commit -m "fix: finalize responsive Herdr isolation"
           git push origin HEAD:feat/herdr-responsive-data-plane
