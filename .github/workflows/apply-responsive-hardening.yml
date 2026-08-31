@@ -1,3 +1,4 @@
+# One-shot hardening patch; removed after success.
 name: Apply responsive Herdr hardening
 
 on:
